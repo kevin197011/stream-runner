@@ -283,7 +283,10 @@ func writePID() {
 			slog.Warn("failed to close pid file", "error", closeErr)
 		}
 	}()
-	fmt.Fprintf(f, "%d\n", os.Getpid())
+	if _, err := fmt.Fprintf(f, "%d\n", os.Getpid()); err != nil {
+		slog.Error("failed to write pid", "error", err)
+		os.Exit(1)
+	}
 }
 
 // rotateLog 检查日志文件大小，如果超过限制则进行轮转。
@@ -306,13 +309,17 @@ func rotateLog() error {
 		oldFile := fmt.Sprintf("%s.%d", LogFile, i)
 		newFile := fmt.Sprintf("%s.%d", LogFile, i+1)
 		if _, err := os.Stat(oldFile); err == nil {
-			os.Rename(oldFile, newFile)
+			if renameErr := os.Rename(oldFile, newFile); renameErr != nil {
+				return fmt.Errorf("failed to rename log file %s to %s: %w", oldFile, newFile, renameErr)
+			}
 		}
 	}
 
 	// Move current log to .1.
 	backupFile := fmt.Sprintf("%s.1", LogFile)
-	os.Rename(LogFile, backupFile)
+	if err := os.Rename(LogFile, backupFile); err != nil {
+		return fmt.Errorf("failed to rename current log file to %s: %w", backupFile, err)
+	}
 	return nil
 }
 
@@ -325,7 +332,10 @@ func initLog() *slog.Logger {
 	}
 
 	// Rotate log if needed (before opening new file).
-	_ = rotateLog()
+	if err := rotateLog(); err != nil {
+		// Log rotation failure is not critical, log warning and continue
+		slog.Warn("log rotation failed", "error", err)
+	}
 
 	f, err := os.OpenFile(LogFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
 	if err != nil {
@@ -366,7 +376,10 @@ func checkFFmpeg() error {
 	// Extract version from output (first line usually contains version info).
 	lines := strings.Split(string(output), "\n")
 	if len(lines) > 0 {
-		fmt.Fprintf(os.Stderr, "[*] FFmpeg detected: %s\n", strings.TrimSpace(lines[0]))
+		if _, err := fmt.Fprintf(os.Stderr, "[*] FFmpeg detected: %s\n", strings.TrimSpace(lines[0])); err != nil {
+			// Non-critical error, just log it
+			slog.Warn("failed to write ffmpeg version to stderr", "error", err)
+		}
 	}
 	return nil
 }
@@ -450,6 +463,7 @@ func main() {
 	// Initial config load.
 	if err := reloadConfig(state); err != nil {
 		slog.Error("initial config load failed", "error", err)
+		cleanupPID() // Clean up before exit since defer won't run
 		os.Exit(1)
 	}
 
