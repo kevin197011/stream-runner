@@ -254,6 +254,57 @@ task :push do
   end
 
   puts '✅ 推送成功'
+
+  # 创建并推送日期 tag
+  create_and_push_tag
+end
+
+# 生成基于日期的 tag 版本号
+def generate_date_tag
+  today = Time.now.strftime('%Y.%m.%d')
+  base_tag = "v#{today}"
+
+  # 获取所有现有 tag
+  existing_tags = `git tag -l "#{base_tag}*" 2>&1`.split("\n").map(&:strip)
+
+  if existing_tags.empty?
+    base_tag
+  else
+    # 找出今天最大的序号
+    max_seq = 0
+    existing_tags.each do |tag|
+      if tag == base_tag
+        max_seq = [max_seq, 1].max
+      elsif tag.match?(/^#{Regexp.escape(base_tag)}\.(\d+)$/)
+        seq = tag.match(/\.(\d+)$/)[1].to_i
+        max_seq = [max_seq, seq].max
+      end
+    end
+    "#{base_tag}.#{max_seq + 1}"
+  end
+end
+
+# 创建并推送 tag
+def create_and_push_tag
+  tag_name = generate_date_tag
+
+  # 创建 tag
+  tag_output = `git tag -a #{tag_name} -m "Release #{tag_name}" 2>&1`
+  unless $?.success?
+    puts "⚠️  创建 tag 失败: #{tag_output}"
+    return
+  end
+
+  puts "🏷️  创建 tag: #{tag_name}"
+
+  # 推送 tag
+  push_tag_output = `git push origin #{tag_name} 2>&1`
+  unless $?.success?
+    puts "⚠️  推送 tag 失败: #{push_tag_output}"
+    return
+  end
+
+  puts "✅ Tag #{tag_name} 推送成功，GitHub Actions 将自动构建 Release"
 end
 
 desc '运行部署脚本生成打包文件'
