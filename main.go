@@ -278,14 +278,17 @@ func writePID() {
 		slog.Error("cannot write pid file", "error", err)
 		os.Exit(1)
 	}
-	defer func() {
+	if _, err := fmt.Fprintf(f, "%d\n", os.Getpid()); err != nil {
+		// Close file before exit since defer won't run
 		if closeErr := f.Close(); closeErr != nil {
 			slog.Warn("failed to close pid file", "error", closeErr)
 		}
-	}()
-	if _, err := fmt.Fprintf(f, "%d\n", os.Getpid()); err != nil {
 		slog.Error("failed to write pid", "error", err)
 		os.Exit(1)
+	}
+	// Close file normally
+	if closeErr := f.Close(); closeErr != nil {
+		slog.Warn("failed to close pid file", "error", closeErr)
 	}
 }
 
@@ -447,7 +450,6 @@ func main() {
 	}()
 
 	writePID()
-	defer cleanupPID()
 
 	// Setup signal handlers.
 	sigChan := make(chan os.Signal, 1)
@@ -461,11 +463,16 @@ func main() {
 	}
 
 	// Initial config load.
+	// Note: We call cleanupPID() explicitly before os.Exit(1) since defer won't run
 	if err := reloadConfig(state); err != nil {
 		slog.Error("initial config load failed", "error", err)
-		cleanupPID() // Clean up before exit since defer won't run
+		cleanupPID()
 		os.Exit(1)
 	}
+
+	// Set up cleanup on normal exit (for signal handlers)
+	// Note: Signal handlers also call cleanupPID() explicitly before os.Exit(0)
+	defer cleanupPID()
 
 	// Watchdog goroutine monitors and restarts stopped workers.
 	go func() {
