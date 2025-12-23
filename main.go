@@ -246,7 +246,10 @@ func loadConfig(path string) (*Config, error) {
 // writePID 将当前进程的 PID 写入 PID 文件。
 // 如果文件不存在会自动创建，如果写入失败会终止程序。
 func writePID() {
-	os.MkdirAll("/var/run", 0755)
+	if err := os.MkdirAll("/var/run", 0755); err != nil {
+		slog.Error("cannot create /var/run directory", "error", err)
+		os.Exit(1)
+	}
 	f, err := os.OpenFile(PIDFilePath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
 	if err != nil {
 		slog.Error("cannot write pid file", "error", err)
@@ -290,7 +293,9 @@ func rotateLog() error {
 // 如果日志文件超过大小限制会先进行轮转。
 // 如果初始化失败会 panic。
 func initLog() *slog.Logger {
-	os.MkdirAll(LogDir, 0755)
+	if err := os.MkdirAll(LogDir, 0755); err != nil {
+		panic(fmt.Errorf("failed to create log directory: %w", err))
+	}
 
 	// Rotate log if needed (before opening new file).
 	_ = rotateLog()
