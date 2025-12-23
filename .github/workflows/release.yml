@@ -110,7 +110,7 @@ jobs:
 
       - name: List generated packages
         run: |
-          ls -lh dist/*.{deb,rpm} || true
+          ls -lh dist/*.deb dist/*.rpm || true
 
       - name: Create Release (for tags only)
         if: github.ref_type == 'tag'
@@ -152,6 +152,8 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: packages-${{ github.sha }}
-          path: dist/*.{deb,rpm}
+          path: |
+            dist/*.deb
+            dist/*.rpm
           retention-days: 30
 
