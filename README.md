@@ -36,21 +36,88 @@ go mod tidy
 go build -o stream-runner main.go
 ```
 
-### 打包部署
+### 从 GitHub Releases 安装
 
-使用 `deploy.rb` 脚本生成 Linux 二进制文件和部署包：
+项目使用 GitHub Actions 自动构建和发布软件包。访问 [Releases](https://github.com/yourorg/stream-runner/releases) 页面下载最新版本：
+
+**Debian/Ubuntu:**
+```bash
+wget https://github.com/yourorg/stream-runner/releases/download/v1.0.0/stream-runner_1.0.0_amd64.deb
+sudo dpkg -i stream-runner_1.0.0_amd64.deb
+```
+
+**RHEL/CentOS:**
+```bash
+wget https://github.com/yourorg/stream-runner/releases/download/v1.0.0/stream-runner-1.0.0-1.x86_64.rpm
+sudo rpm -i stream-runner-1.0.0-1.x86_64.rpm
+```
+
+### 从 GitHub Releases 安装
+
+项目使用 GitHub Actions 自动构建和发布软件包。访问 [Releases](https://github.com/yourorg/stream-runner/releases) 页面下载最新版本：
+
+**Debian/Ubuntu:**
+```bash
+wget https://github.com/yourorg/stream-runner/releases/download/v1.0.0/stream-runner_1.0.0_amd64.deb
+sudo dpkg -i stream-runner_1.0.0_amd64.deb
+```
+
+**RHEL/CentOS:**
+```bash
+wget https://github.com/yourorg/stream-runner/releases/download/v1.0.0/stream-runner-1.0.0-1.x86_64.rpm
+sudo rpm -i stream-runner-1.0.0-1.x86_64.rpm
+```
+
+### 本地打包部署
+
+使用 `scripts/deploy.rb` 脚本在本地生成 Linux 软件包（.deb 和 .rpm）：
 
 ```bash
-ruby deploy.rb
+ruby scripts/deploy.rb
 ```
 
 这将生成：
-- `stream-runner.tar.gz` - 完整的部署包
-- 包含 Linux 二进制文件、配置文件、systemd 服务文件和部署脚本
+- `dist/stream-runner_1.0.0_amd64.deb` - Debian/Ubuntu 软件包
+- `dist/stream-runner-1.0.0-1.x86_64.rpm` - RHEL/CentOS 软件包
+
+软件包包含：
+- 二进制文件：`/usr/local/bin/stream-runner`
+- 配置文件：`/etc/stream-runner/streams.yml`
+- systemd 服务：`/etc/systemd/system/stream-runner.service`
+
+#### 安装软件包
+
+**Debian/Ubuntu:**
+```bash
+sudo dpkg -i dist/stream-runner_*.deb
+```
+
+**RHEL/CentOS:**
+```bash
+sudo rpm -i dist/stream-runner-*.rpm
+```
+
+安装后会自动：
+- 启用 systemd 服务
+- 创建必要的目录
+- 设置配置文件权限
+
+#### 配置
+
+安装后编辑配置文件：
+```bash
+sudo nano /etc/stream-runner/streams.yml
+```
+
+然后启动服务：
+```bash
+sudo systemctl start stream-runner
+sudo systemctl status stream-runner
+```
 
 ## 配置说明
 
-配置文件位于 `/etc/stream-runner/streams.yaml`，格式如下：
+配置文件位于 `/etc/stream-runner/streams.yml`，格式如下：
 
 ```yaml
 streams:
@@ -75,7 +142,7 @@ streams:
 ```bash
 # 确保配置文件存在
 sudo mkdir -p /etc/stream-runner
-sudo cp config/streams.yaml /etc/stream-runner/
+sudo cp config/streams.yml /etc/stream-runner/
 
 # 运行服务
 sudo ./stream-runner
@@ -210,12 +277,18 @@ sudo tail -f /var/log/stream-runner/stream.log
 
 ```
 stream-runner/
-├── main.go          # 主程序
-├── go.mod           # Go 模块定义
-├── go.sum           # 依赖校验和
-├── deploy.rb        # 部署脚本生成器
-├── Rakefile         # Rake 任务定义
-└── README.md        # 本文档
+├── main.go              # 主程序
+├── go.mod               # Go 模块定义
+├── go.sum               # 依赖校验和
+├── nfpm.yaml            # nfpm 打包配置
+├── scripts/             # 构建和部署脚本
+│   ├── deploy.rb        # 本地打包脚本
+│   └── nfpm/            # nfpm 安装/卸载脚本
+├── .github/workflows/   # GitHub Actions 工作流
+│   ├── ci.yml           # CI 工作流（测试、lint、构建）
+│   └── release.yml      # 发布工作流（自动打包和发布）
+├── Rakefile             # Rake 任务定义
+└── README.md            # 本文档
 ```
 
 ### 构建选项
@@ -226,6 +299,41 @@ go build -o stream-runner main.go
 
 # 交叉编译（Linux amd64）
 GOOS=linux GOARCH=amd64 go build -o stream-runner main.go
+```
+
+### GitHub Actions
+
+项目配置了 GitHub Actions 自动化工作流：
+
+1. **CI 工作流** (`.github/workflows/ci.yml`)
+   - 在 push 到 main/develop 分支或创建 PR 时触发
+   - 运行测试和代码检查
+   - 构建二进制文件
+
+2. **Release 工作流** (`.github/workflows/release.yml`)
+   - 在推送 tag（格式：`v*`）时自动触发
+   - 构建 Linux 二进制文件
+   - 使用 nfpm 生成 .deb 和 .rpm 包
+   - 自动创建 GitHub Release 并上传软件包
+
+#### 创建新版本发布
+
+```bash
+# 1. 更新版本号（在 nfpm.yaml 和代码中）
+# 2. 提交更改
+git add .
+git commit -m "chore: bump version to 1.0.1"
+
+# 3. 创建并推送 tag
+git tag -a v1.0.1 -m "Release v1.0.1"
+git push origin v1.0.1
+
+# GitHub Actions 会自动：
+# - 检测到 tag 推送
+# - 构建二进制文件
+# - 生成 .deb 和 .rpm 包
+# - 创建 GitHub Release
+# - 上传软件包到 Release
 ```
 
 ## 许可证

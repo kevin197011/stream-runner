@@ -1,0 +1,81 @@
+# nfpm 配置文件
+# 用于生成 .deb 和 .rpm 软件包
+# yaml-language-server: $schema=https://nfpm.goreleaser.com/schema.json
+
+name: stream-runner
+arch: amd64
+platform: linux
+version: "1.0.0"
+section: utils
+priority: extra
+maintainer: "kk <your-email@example.com>"
+description: |
+  RTMP Stream Runner - 一个用于管理和转发 RTMP 流的服务
+  支持多路流并发处理、自动重连、日志捕获和配置热重载
+vendor: "Stream Runner"
+homepage: "https://github.com/yourorg/stream-runner"
+license: "MIT"
+
+# 依赖关系
+depends:
+  - ffmpeg
+
+# 推荐包
+recommends: []
+
+# 建议包
+suggests: []
+
+# 冲突包
+conflicts: []
+
+# 替换包
+replaces: []
+
+# 提供包
+provides: []
+
+# 文件映射
+contents:
+  # 二进制文件
+  - src: ./dist/bin/stream-runner
+    dst: /usr/local/bin/stream-runner
+    type: file
+    file_info:
+      mode: 0755
+      owner: root
+      group: root
+
+  # 配置文件
+  - src: ./dist/config/streams.yml
+    dst: /etc/stream-runner/streams.yml
+    type: config
+    file_info:
+      mode: 0644
+      owner: root
+      group: root
+
+  # systemd 服务文件
+  - src: ./dist/scripts/stream-runner.service
+    dst: /etc/systemd/system/stream-runner.service
+    type: file
+    file_info:
+      mode: 0644
+      owner: root
+      group: root
+
+# 包特定覆盖
+overrides:
+  # Debian/Ubuntu 特定配置
+  deb:
+    scripts:
+      postinstall: ./scripts/nfpm/postinstall.sh
+      preremove: ./scripts/nfpm/preremove.sh
+      postremove: ./scripts/nfpm/postremove.sh
+
+  # RHEL/CentOS 特定配置
+  rpm:
+    scripts:
+      postinstall: ./scripts/nfpm/postinstall.sh
+      preremove: ./scripts/nfpm/preremove.sh
+      postremove: ./scripts/nfpm/postremove.sh

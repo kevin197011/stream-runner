@@ -1,1 +1,7 @@
 .cursor
+dist/
+*.deb
+*.rpm
+
+# GitHub Actions
+!.github/workflows/

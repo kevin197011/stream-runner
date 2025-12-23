@@ -1,0 +1,157 @@
+name: Build and Release
+
+on:
+  push:
+    branches:
+      - main      # 主分支更新时触发
+      - develop   # 开发分支更新时触发
+    tags:
+      - 'v*'      # 推送以 v 开头的 tag 时触发，如 v1.0.0
+  workflow_dispatch:  # 允许手动触发
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write  # 需要写入权限来创建 release
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.21'
+
+      - name: Extract version from tag or commit
+        id: version
+        run: |
+          if [ "${{ github.ref_type }}" == "tag" ]; then
+            VERSION=${GITHUB_REF#refs/tags/v}
+            echo "version=$VERSION" >> $GITHUB_OUTPUT
+            echo "tag=${{ github.ref_name }}" >> $GITHUB_OUTPUT
+          else
+            # 使用 commit SHA 前 7 位作为版本号
+            SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-7)
+            VERSION="dev-${SHORT_SHA}"
+            echo "version=$VERSION" >> $GITHUB_OUTPUT
+            echo "tag=dev-${SHORT_SHA}" >> $GITHUB_OUTPUT
+          fi
+          echo "Extracted version: $VERSION"
+
+      - name: Install nfpm
+        run: |
+          go install github.com/goreleaser/nfpm/v2/cmd/nfpm@latest
+
+      - name: Prepare build directory
+        run: |
+          mkdir -p dist/bin dist/config dist/scripts
+
+      - name: Build binary
+        env:
+          GOOS: linux
+          GOARCH: amd64
+        run: |
+          go mod tidy
+          go build -o dist/bin/stream-runner main.go
+
+      - name: Create config file
+        run: |
+          cat > dist/config/streams.yml << 'EOF'
+          streams:
+          - id: stream-1
+            src: rtmp://example.com/live/stream1
+            dst: rtmp://127.0.0.1:1936/live/stream1
+          - id: stream-2
+            src: rtmp://example.com/live/stream2
+            dst: rtmp://127.0.0.1:1936/live/stream2
+          - id: stream-3
+            src: rtmp://example.com/live/stream3
+            dst: rtmp://127.0.0.1:1936/live/stream3
+          - id: stream-4
+            src: rtmp://example.com/live/stream4
+            dst: rtmp://127.0.0.1:1936/live/stream4
+          EOF
+
+      - name: Create systemd service file
+        run: |
+          cat > dist/scripts/stream-runner.service << 'EOF'
+          [Unit]
+          Description=RTMP Stream Runner
+          After=network.target
+
+          [Service]
+          Type=simple
+          ExecStart=/usr/local/bin/stream-runner
+          Restart=always
+          RestartSec=5
+          PIDFile=/var/run/stream-runner.pid
+          User=root
+          Group=root
+
+          [Install]
+          WantedBy=multi-user.target
+          EOF
+
+      - name: Update nfpm.yaml with version
+        run: |
+          sed -i "s/version: \".*\"/version: \"${{ steps.version.outputs.version }}\"/" nfpm.yaml
+
+      - name: Build .deb package
+        run: |
+          nfpm pkg --packager deb --config nfpm.yaml --target dist/
+
+      - name: Build .rpm package
+        run: |
+          nfpm pkg --packager rpm --config nfpm.yaml --target dist/
+
+      - name: List generated packages
+        run: |
+          ls -lh dist/*.{deb,rpm} || true
+
+      - name: Create Release (for tags only)
+        if: github.ref_type == 'tag'
+        uses: softprops/action-gh-release@v1
+        with:
+          files: |
+            dist/*.deb
+            dist/*.rpm
+          name: Release ${{ steps.version.outputs.tag }}
+          body: |
+            ## Stream Runner ${{ steps.version.outputs.version }}
+
+            ### Installation
+
+            **Debian/Ubuntu:**
+            ```bash
+            sudo dpkg -i stream-runner_${{ steps.version.outputs.version }}_amd64.deb
+            ```
+
+            **RHEL/CentOS:**
+            ```bash
+            sudo rpm -i stream-runner-${{ steps.version.outputs.version }}-1.x86_64.rpm
+            ```
+
+            ### Package Contents
+            - Binary: `/usr/local/bin/stream-runner`
+            - Config: `/etc/stream-runner/streams.yml`
+            - Service: `/etc/systemd/system/stream-runner.service`
+
+            ### After Installation
+            1. Edit configuration: `sudo nano /etc/stream-runner/streams.yml`
+            2. Start service: `sudo systemctl start stream-runner`
+            3. Check status: `sudo systemctl status stream-runner`
+          draft: false
+          prerelease: false
+
+      - name: Upload artifacts (for branch updates)
+        if: github.ref_type != 'tag'
+        uses: actions/upload-artifact@v4
+        with:
+          name: packages-${{ github.sha }}
+          path: dist/*.{deb,rpm}
+          retention-days: 30
+
