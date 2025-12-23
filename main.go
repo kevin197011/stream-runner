@@ -436,11 +436,15 @@ func reloadConfig(state *AppState) error {
 	return nil
 }
 
-func main() {
+// run 是应用程序的主逻辑入口，返回退出码。
+// 使用 return 而不是 os.Exit，确保 defer 语句能正常执行。
+func run() int {
 	// Check ffmpeg availability before starting.
 	if err := checkFFmpeg(); err != nil {
-		fmt.Fprintf(os.Stderr, "ERROR: %v\n", err)
-		os.Exit(1)
+		if _, printErr := fmt.Fprintf(os.Stderr, "ERROR: %v\n", err); printErr != nil {
+			slog.Error("failed to print error to stderr", "error", printErr)
+		}
+		return 1
 	}
 
 	logger := initLog()
@@ -450,6 +454,7 @@ func main() {
 	}()
 
 	writePID()
+	defer cleanupPID()
 
 	// Setup signal handlers.
 	sigChan := make(chan os.Signal, 1)
@@ -463,16 +468,10 @@ func main() {
 	}
 
 	// Initial config load.
-	// Note: We call cleanupPID() explicitly before os.Exit(1) since defer won't run
 	if err := reloadConfig(state); err != nil {
 		slog.Error("initial config load failed", "error", err)
-		cleanupPID()
-		os.Exit(1)
+		return 1
 	}
-
-	// Set up cleanup on normal exit (for signal handlers)
-	// Note: Signal handlers also call cleanupPID() explicitly before os.Exit(0)
-	defer cleanupPID()
 
 	// Watchdog goroutine monitors and restarts stopped workers.
 	go func() {
@@ -538,8 +537,11 @@ func main() {
 				w.ForceKill()
 			}
 			state.mu.Unlock()
-			cleanupPID()
-			os.Exit(0)
+			return 0
 		}
 	}
+}
+
+func main() {
+	os.Exit(run())
 }
