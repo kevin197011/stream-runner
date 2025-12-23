@@ -138,7 +138,9 @@ func (w *StreamWorker) startLoop() {
 		stderrPipe, err := cmd.StderrPipe()
 		if err != nil {
 			w.mu.Unlock()
-			stdoutPipe.Close()
+			if closeErr := stdoutPipe.Close(); closeErr != nil {
+				slog.Warn("failed to close stdout pipe", "stream_id", w.cfg.ID, "error", closeErr)
+			}
 			slog.Error("failed to create stderr pipe", "stream_id", w.cfg.ID, "error", err)
 			time.Sleep(1 * time.Second)
 			continue
@@ -151,8 +153,12 @@ func (w *StreamWorker) startLoop() {
 		slog.Info("starting ffmpeg", "stream_id", w.cfg.ID)
 		if err := cmd.Start(); err != nil {
 			slog.Error("failed to start ffmpeg", "stream_id", w.cfg.ID, "error", err)
-			stdoutPipe.Close()
-			stderrPipe.Close()
+			if closeErr := stdoutPipe.Close(); closeErr != nil {
+				slog.Warn("failed to close stdout pipe", "stream_id", w.cfg.ID, "error", closeErr)
+			}
+			if closeErr := stderrPipe.Close(); closeErr != nil {
+				slog.Warn("failed to close stderr pipe", "stream_id", w.cfg.ID, "error", closeErr)
+			}
 			w.mu.Lock()
 			w.running = false
 			w.mu.Unlock()
@@ -176,14 +182,26 @@ func (w *StreamWorker) startLoop() {
 
 		go func() {
 			defer wg.Done()
-			defer stdoutPipe.Close()
-			io.Copy(stdoutWriter, stdoutPipe)
+			defer func() {
+				if closeErr := stdoutPipe.Close(); closeErr != nil {
+					slog.Warn("failed to close stdout pipe", "stream_id", w.cfg.ID, "error", closeErr)
+				}
+			}()
+			if _, err := io.Copy(stdoutWriter, stdoutPipe); err != nil {
+				slog.Warn("failed to copy stdout", "stream_id", w.cfg.ID, "error", err)
+			}
 		}()
 
 		go func() {
 			defer wg.Done()
-			defer stderrPipe.Close()
-			io.Copy(stderrWriter, stderrPipe)
+			defer func() {
+				if closeErr := stderrPipe.Close(); closeErr != nil {
+					slog.Warn("failed to close stderr pipe", "stream_id", w.cfg.ID, "error", closeErr)
+				}
+			}()
+			if _, err := io.Copy(stderrWriter, stderrPipe); err != nil {
+				slog.Warn("failed to copy stderr", "stream_id", w.cfg.ID, "error", err)
+			}
 		}()
 
 		err = cmd.Wait()
@@ -224,9 +242,14 @@ func (w *StreamWorker) ForceKill() {
 	slog.Info("force killing process", "stream_id", w.cfg.ID, "pid", pid)
 	if err := syscall.Kill(-pid, syscall.SIGKILL); err != nil {
 		slog.Warn("kill failed, trying direct kill", "stream_id", w.cfg.ID, "error", err)
-		syscall.Kill(pid, syscall.SIGKILL)
+		if killErr := syscall.Kill(pid, syscall.SIGKILL); killErr != nil {
+			slog.Warn("direct kill also failed", "stream_id", w.cfg.ID, "error", killErr)
+		}
 	}
-	_ = w.cmd.Wait()
+	if waitErr := w.cmd.Wait(); waitErr != nil {
+		// Process already killed, ignore wait error
+		_ = waitErr
+	}
 	w.running = false
 }
 
@@ -255,7 +278,11 @@ func writePID() {
 		slog.Error("cannot write pid file", "error", err)
 		os.Exit(1)
 	}
-	defer f.Close()
+	defer func() {
+		if closeErr := f.Close(); closeErr != nil {
+			slog.Warn("failed to close pid file", "error", closeErr)
+		}
+	}()
 	fmt.Fprintf(f, "%d\n", os.Getpid())
 }
 
