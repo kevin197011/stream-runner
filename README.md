@@ -38,23 +38,7 @@ go build -o stream-runner main.go
 
 ### 从 GitHub Releases 安装
 
-项目使用 GitHub Actions 自动构建和发布软件包。访问 [Releases](https://github.com/yourorg/stream-runner/releases) 页面下载最新版本：
-
-**Debian/Ubuntu:**
-```bash
-wget https://github.com/yourorg/stream-runner/releases/download/v1.0.0/stream-runner_1.0.0_amd64.deb
-sudo dpkg -i stream-runner_1.0.0_amd64.deb
-```
-
-**RHEL/CentOS:**
-```bash
-wget https://github.com/yourorg/stream-runner/releases/download/v1.0.0/stream-runner-1.0.0-1.x86_64.rpm
-sudo rpm -i stream-runner-1.0.0-1.x86_64.rpm
-```
-
-### 从 GitHub Releases 安装
-
-项目使用 GitHub Actions 自动构建和发布软件包。访问 [Releases](https://github.com/yourorg/stream-runner/releases) 页面下载最新版本：
+访问 [Releases](https://github.com/yourorg/stream-runner/releases) 页面下载最新版本：
 
 **Debian/Ubuntu:**
 ```bash
@@ -285,8 +269,7 @@ stream-runner/
 │   ├── deploy.rb        # 本地打包脚本
 │   └── nfpm/            # nfpm 安装/卸载脚本
 ├── .github/workflows/   # GitHub Actions 工作流
-│   ├── ci.yml           # CI 工作流（测试、lint、构建）
-│   └── release.yml      # 发布工作流（自动打包和发布）
+│   └── release.yml      # 自动构建和发布工作流
 ├── Rakefile             # Rake 任务定义
 └── README.md            # 本文档
 ```
@@ -303,23 +286,15 @@ GOOS=linux GOARCH=amd64 go build -o stream-runner main.go
 
 ### GitHub Actions
 
-项目配置了 GitHub Actions 自动化工作流：
+项目配置了 GitHub Actions 自动构建和发布：
 
-1. **CI 工作流** (`.github/workflows/ci.yml`)
-   - 在 push 到 main/develop 分支或创建 PR 时触发
-   - 运行测试和代码检查
-   - 构建二进制文件
-
-2. **Release 工作流** (`.github/workflows/release.yml`)
-   - 在推送 tag（格式：`v*`）时自动触发
-   - 构建 Linux 二进制文件
-   - 使用 nfpm 生成 .deb 和 .rpm 包
-   - 自动创建 GitHub Release 并上传软件包
+- 在 push 到 main/develop 分支时自动构建
+- 在推送 tag（格式：`v*`）时自动创建 Release 并上传软件包
 
 #### 创建新版本发布
 
 ```bash
-# 1. 更新版本号（在 nfpm.yaml 和代码中）
+# 1. 更新版本号（在 nfpm.yaml 中）
 # 2. 提交更改
 git add .
 git commit -m "chore: bump version to 1.0.1"
@@ -327,13 +302,6 @@ git commit -m "chore: bump version to 1.0.1"
 # 3. 创建并推送 tag
 git tag -a v1.0.1 -m "Release v1.0.1"
 git push origin v1.0.1
-
-# GitHub Actions 会自动：
-# - 检测到 tag 推送
-# - 构建二进制文件
-# - 生成 .deb 和 .rpm 包
-# - 创建 GitHub Release
-# - 上传软件包到 Release
 ```
 
 ## 许可证
