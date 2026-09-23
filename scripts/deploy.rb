@@ -112,7 +112,7 @@ end
 
 puts "\n[*] Package contents:"
 puts "  - Binary: /usr/local/bin/#{APP}"
-puts "  - Config: /etc/#{APP}/streams.yml"
+puts "  - Config template: /usr/share/#{APP}/streams.yml"
 puts "  - Service: /etc/systemd/system/#{APP}.service"
 puts "\n[*] Installation:"
 puts "  Debian/Ubuntu: sudo dpkg -i dist/#{APP}_*.deb"

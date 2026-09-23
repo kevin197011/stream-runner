@@ -46,10 +46,10 @@ contents:
       owner: root
       group: root
 
-  # 配置文件
+  # Default config. postinstall copies it to /etc only when that file is absent.
   - src: ./dist/config/streams.yml
-    dst: /etc/stream-runner/streams.yml
-    type: config
+    dst: /usr/share/stream-runner/streams.yml
+    type: file
     file_info:
       mode: 0644
       owner: root

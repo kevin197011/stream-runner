@@ -65,7 +65,7 @@ ruby scripts/deploy.rb
 
 软件包包含：
 - 二进制文件：`/usr/local/bin/stream-runner`
-- 配置文件：`/etc/stream-runner/streams.yml`
+- 配置模板：`/usr/share/stream-runner/streams.yml`（仅当 `/etc/stream-runner/streams.yml` 不存在时复制过去，已有文件不覆盖）
 - systemd 服务：`/etc/systemd/system/stream-runner.service`
 
 #### 安装软件包
@@ -82,8 +82,8 @@ sudo rpm -i dist/stream-runner-*.rpm
 
 安装后会自动：
 - 启用 systemd 服务
-- 创建必要的目录
-- 设置配置文件权限
+- 创建 `/etc/stream-runner`
+- 配置文件不存在时，从模板生成 `/etc/stream-runner/streams.yml`
 
 #### 配置
 
