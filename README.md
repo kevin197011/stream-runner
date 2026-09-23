@@ -198,7 +198,7 @@ sudo kill -HUP $(cat /var/run/stream-runner.pid)
 
 拉流成功后，每 10 秒在 `stream.log` 记一条源节奏。`behind_s` 是从这次拉流起，墙上时间比媒体时间多出来的秒数：大于 0 表示源送得比实时慢，落后在累积。达到 3 秒，或两次采样间隔超过 20 秒，记 `source lagging`。`speed` 是 ffmpeg 的输出倍速，明显低于 `1.0x` 同样说明源在拖。
 
-同一条里的 `dial_ms` 是到源站的一次 TCP 握手耗时（毫秒），用来看网络往返。握手失败会多一个 `dial_error`。`behind_s` 变大而 `dial_ms` 很小，是源没在送；两个一起变大，网络也慢。这不是正在拉流那条连接的内核 RTT，也不是摄像机到画面的端到端延迟。
+同一条里带拉流路径：`src_host`、`src_ip`、`resolve_ms`（解析耗时）、`dial_ms`（连上该 IP 的 TCP 握手耗时）。解析或握手失败多一个 `dial_error`。握手达到 300 毫秒或失败，而媒体时钟还正常时，记 `pull network`。ffmpeg 一退出也会再探一次并写在 `ffmpeg exited` 上，所以源站还没连上、没有进度时也能看到网络结果。`behind_s` 变大而 `dial_ms` 很小，是源没在送；两个一起变大，网络也慢。这不是正在拉流那条连接的内核 RTT，也不是摄像机到画面的端到端延迟。
 
 ### 日志轮转
 

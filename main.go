@@ -5,6 +5,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -48,6 +49,8 @@ const (
 	// This is relay pace, not camera-to-screen latency.
 	lagWarn     = 3 * time.Second
 	dialTimeout = 2 * time.Second
+	// netWarn is a slow TCP handshake to the pull source.
+	netWarn = 300 * time.Millisecond
 )
 
 // startFFmpeg builds the copy process for one stream. Tests replace it.
@@ -205,28 +208,87 @@ func rtmpAddr(src string) (string, error) {
 	return net.JoinHostPort(u.Hostname(), port), nil
 }
 
-// dialSource times one TCP handshake to the source host.
+// pullNet is one probe of the path to the pull source.
 // ponytail: fresh connect, not the live RTMP socket RTT. Use that socket's TCP_INFO if this number disagrees with the path.
-func dialSource(src string) (string, error) {
-	addr, err := rtmpAddr(src)
-	if err != nil {
-		return "", err
-	}
-	start := time.Now()
-	conn, err := net.DialTimeout("tcp", addr, dialTimeout)
-	if err != nil {
-		return "", err
-	}
-	ms := fmt.Sprintf("%.0f", float64(time.Since(start))/float64(time.Millisecond))
-	if err := conn.Close(); err != nil {
-		return ms, nil
-	}
-	return ms, nil
+type pullNet struct {
+	host     string
+	ip       string
+	resolve  time.Duration
+	dial     time.Duration
+	resolved bool
+	dialed   bool
+	err      error
 }
 
-// readProgress logs source pace and a TCP handshake time to the source host.
-// behind_s grows when media arrives slower than realtime. dial_ms is path delay.
-func readProgress(streamID string, r io.Reader, now func() time.Time, probe func() (string, error)) {
+func (n pullNet) logAttrs() []any {
+	resolveMS := ""
+	if n.resolved {
+		resolveMS = fmt.Sprintf("%.0f", float64(n.resolve)/float64(time.Millisecond))
+	}
+	dialMS := ""
+	if n.dialed {
+		dialMS = fmt.Sprintf("%.0f", float64(n.dial)/float64(time.Millisecond))
+	}
+	attrs := []any{
+		"src_host", n.host,
+		"src_ip", n.ip,
+		"resolve_ms", resolveMS,
+		"dial_ms", dialMS,
+	}
+	if n.err != nil {
+		attrs = append(attrs, "dial_error", n.err.Error())
+	}
+	return attrs
+}
+
+func (n pullNet) slow() bool {
+	return n.err != nil || (n.dialed && n.dial >= netWarn)
+}
+
+func probePull(src string) pullNet {
+	var out pullNet
+	u, err := url.Parse(src)
+	if err != nil || u.Hostname() == "" {
+		out.err = fmt.Errorf("bad source url")
+		return out
+	}
+	port := u.Port()
+	if port == "" {
+		port = "1935"
+	}
+	out.host = net.JoinHostPort(u.Hostname(), port)
+	ctx, cancel := context.WithTimeout(context.Background(), dialTimeout)
+	defer cancel()
+	start := time.Now()
+	ips, err := net.DefaultResolver.LookupIPAddr(ctx, u.Hostname())
+	out.resolve = time.Since(start)
+	out.resolved = true
+	if err != nil {
+		out.err = err
+		return out
+	}
+	if len(ips) == 0 {
+		out.err = fmt.Errorf("no address")
+		return out
+	}
+	out.ip = ips[0].String()
+	start = time.Now()
+	conn, err := net.DialTimeout("tcp", net.JoinHostPort(out.ip, port), dialTimeout)
+	out.dial = time.Since(start)
+	out.dialed = true
+	if err != nil {
+		out.err = err
+		return out
+	}
+	if cerr := conn.Close(); cerr != nil {
+		// Handshake finished. A close error is not path delay.
+	}
+	return out
+}
+
+// readProgress logs source pace and the pull-path probe.
+// behind_s grows when media arrives slower than realtime.
+func readProgress(streamID string, r io.Reader, now func() time.Time, probe func() pullNet) {
 	sc := bufio.NewScanner(r)
 	var (
 		media     time.Duration
@@ -276,21 +338,21 @@ func readProgress(streamID string, r io.Reader, now func() time.Time, probe func
 			behind := t.Sub(wall0) - (media - media0)
 			gap := t.Sub(lastWall)
 			lastWall = t
-			dialMS, dialErr := probe()
+			netSample := probe()
 			attrs := []any{
 				"stream_id", streamID,
 				"behind_s", fmt.Sprintf("%.1f", behind.Seconds()),
 				"speed", speed,
 				"fps", fps,
 				"gap_s", fmt.Sprintf("%.1f", gap.Seconds()),
-				"dial_ms", dialMS,
 			}
-			if dialErr != nil {
-				attrs = append(attrs, "dial_error", dialErr.Error())
-			}
-			if behind >= lagWarn || gap > statsPeriod*2 {
+			attrs = append(attrs, netSample.logAttrs()...)
+			switch {
+			case behind >= lagWarn || gap > statsPeriod*2:
 				slog.Warn("source lagging", attrs...)
-			} else {
+			case netSample.slow():
+				slog.Warn("pull network", attrs...)
+			default:
 				slog.Info("source pace", attrs...)
 			}
 			haveMedia = false
@@ -362,8 +424,8 @@ func (w *StreamWorker) runOnce() (time.Duration, error) {
 	go func() {
 		defer wg.Done()
 		defer closeRead(progressR)
-		readProgress(w.cfg.ID, progressR, time.Now, func() (string, error) {
-			return dialSource(w.cfg.Src)
+		readProgress(w.cfg.ID, progressR, time.Now, func() pullNet {
+			return probePull(w.cfg.Src)
 		})
 	}()
 
@@ -388,10 +450,12 @@ func (w *StreamWorker) startLoop() {
 		if w.stoppedRequested() {
 			return
 		}
+		exitAttrs := []any{"stream_id", w.cfg.ID, "retry_in", backoff.String()}
+		exitAttrs = append(exitAttrs, probePull(w.cfg.Src).logAttrs()...)
 		if err != nil {
-			slog.Error("ffmpeg exited", "stream_id", w.cfg.ID, "error", err, "retry_in", backoff.String())
+			slog.Error("ffmpeg exited", append([]any{"error", err}, exitAttrs...)...)
 		} else {
-			slog.Info("ffmpeg exited", "stream_id", w.cfg.ID, "retry_in", backoff.String())
+			slog.Info("ffmpeg exited", exitAttrs...)
 		}
 		if !w.sleepOrStop(backoff) {
 			return
