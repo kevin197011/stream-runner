@@ -1,15 +1,20 @@
-// Package main 提供 RTMP 流管理和转发服务。
-// 支持多路流并发处理、自动重连、日志捕获和配置热重载。
+// Package main supervises ffmpeg processes that copy RTMP streams.
+// Each configured stream is restarted until Stop. Disconnects are pulled again.
 package main
 
 import (
+	"bufio"
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
+	"net/url"
 	"os"
 	"os/exec"
 	"os/signal"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -19,241 +24,440 @@ import (
 )
 
 const (
-	// ConfigPath 是配置文件的默认路径。
+	// ConfigPath is the default stream configuration file.
 	ConfigPath = "/etc/stream-runner/streams.yml"
-	// LogDir 是日志文件的默认目录。
+	// LogDir is the default log directory.
 	LogDir = "/var/log/stream-runner"
-	// LogFile 是主日志文件的默认路径。
+	// LogFile is the default slog JSON log file.
 	LogFile = "/var/log/stream-runner/stream.log"
-	// PIDFilePath 是 PID 文件的默认路径。
+	// PIDFilePath is the default pid file.
 	PIDFilePath = "/var/run/stream-runner.pid"
-	// MaxLogSize 是日志文件的最大大小（100MB）。
+	// MaxLogSize is the size that triggers log rotation (100MB).
 	MaxLogSize = 100 * 1024 * 1024
-	// MaxLogFiles 是保留的最大日志文件数量。
+	// MaxLogFiles is how many rotated logs to keep.
 	MaxLogFiles = 5
+
+	minRetry = time.Second
+	maxRetry = 30 * time.Second
+	// connectedMin stays above rwTimeout. A failed open dies at the read
+	// timeout and must count as a short run so backoff keeps growing.
+	connectedMin = 20 * time.Second
+	rwTimeout    = 10 * time.Second
+	statsPeriod  = 10 * time.Second
+	// lagWarn is how far media time may fall behind wall time before a warning.
+	// This is relay pace, not camera-to-screen latency.
+	lagWarn     = 3 * time.Second
+	dialTimeout = 2 * time.Second
 )
 
-// StreamConfig 表示单个 RTMP 流的配置信息。
+// startFFmpeg builds the copy process for one stream. Tests replace it.
+var startFFmpeg = func(src, dst string) *exec.Cmd {
+	return exec.Command("ffmpeg",
+		"-hide_banner",
+		"-loglevel", "warning",
+		"-stats_period", strconv.Itoa(int(statsPeriod.Seconds())),
+		"-progress", "pipe:3",
+		"-rw_timeout", fmt.Sprintf("%d", rwTimeout.Microseconds()),
+		"-rtmp_live", "live",
+		"-i", src,
+		"-c", "copy",
+		"-f", "flv",
+		dst,
+	)
+}
+
+// StreamConfig is one RTMP copy.
 type StreamConfig struct {
-	// ID 是流的唯一标识符。
-	ID string `yaml:"id"`
-	// Src 是源 RTMP 流地址。
+	ID  string `yaml:"id"`
 	Src string `yaml:"src"`
-	// Dst 是目标 RTMP 流地址。
 	Dst string `yaml:"dst"`
 }
 
-// Config 表示应用程序的完整配置。
+// Config is the streams file.
 type Config struct {
-	// Streams 是所有要管理的 RTMP 流配置列表。
 	Streams []StreamConfig `yaml:"streams"`
 }
 
-// StreamWorker 管理单个 RTMP 流的工作器，负责启动、监控和停止 ffmpeg 进程。
+// StreamWorker runs one ffmpeg copy until Stop.
+// The loop exits only when stop is closed. ffmpeg errors retry.
 type StreamWorker struct {
-	// cfg 是流的配置信息。
-	cfg StreamConfig
-	// running 表示工作器是否正在运行。
-	running bool
-	// cmd 是当前运行的 ffmpeg 命令进程。
-	cmd *exec.Cmd
-	// mu 保护并发访问的互斥锁。
-	mu sync.Mutex
+	cfg     StreamConfig
+	cmd     *exec.Cmd
+	stop    chan struct{}
+	stopped chan struct{}
+	mu      sync.Mutex
 }
 
-// AppState 表示应用程序的全局状态。
+// AppState is the set of live workers.
 type AppState struct {
-	// workers 是所有流工作器的映射表，key 为流 ID。
 	workers map[string]*StreamWorker
-	// mu 保护并发访问的读写互斥锁。
-	mu sync.RWMutex
-	// logger 是结构化日志记录器。
-	logger *slog.Logger
+	mu      sync.Mutex
 }
 
-// StreamLogWriter 包装 io.Writer，为每行日志添加流 ID 和时间戳前缀。
+// StreamLogWriter prefixes each complete line with a timestamp and stream id.
 type StreamLogWriter struct {
-	// streamID 是流的标识符，用于日志前缀。
 	streamID string
-	// writer 是底层写入器。
-	writer io.Writer
-	// buf 是缓冲区，用于处理不完整的行。
-	buf bytes.Buffer
-	// mu 保护并发写入的互斥锁。
-	mu sync.Mutex
+	writer   io.Writer
+	buf      bytes.Buffer
+	mu       sync.Mutex
 }
 
-// Write 实现 io.Writer 接口，将数据写入并添加时间戳和流 ID 前缀。
-func (w *StreamLogWriter) Write(p []byte) (n int, err error) {
+// Write implements io.Writer. Incomplete lines stay buffered.
+func (w *StreamLogWriter) Write(p []byte) (int, error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
 	w.buf.Write(p)
-
-	// Process complete lines.
 	for {
 		line, err := w.buf.ReadString('\n')
-		if err == io.EOF {
-			break // Incomplete line, keep in buffer.
+		if errors.Is(err, io.EOF) {
+			break
 		}
 		if err != nil {
 			return len(p), err
 		}
-
-		// Remove trailing newline and write with prefix and timestamp.
 		line = strings.TrimSuffix(line, "\n")
-		if line != "" {
-			timestamp := time.Now().Format("2006-01-02 15:04:05")
-			_, err = fmt.Fprintf(w.writer, "[%s] [%s] %s\n", timestamp, w.streamID, line)
-			if err != nil {
-				return len(p), err
-			}
+		if line == "" {
+			continue
+		}
+		timestamp := time.Now().Format("2006-01-02 15:04:05")
+		if _, err := fmt.Fprintf(w.writer, "[%s] [%s] %s\n", timestamp, w.streamID, line); err != nil {
+			return len(p), err
 		}
 	}
-
 	return len(p), nil
 }
 
-// startLoop 启动流工作器的主循环，持续监控和重启 ffmpeg 进程。
-func (w *StreamWorker) startLoop() {
-	for {
-		w.mu.Lock()
-		w.running = true
-		cmd := exec.Command("ffmpeg",
-			"-rw_timeout", "2000000",
-			"-i", w.cfg.Src,
-			"-c", "copy",
-			"-f", "flv",
-			w.cfg.Dst,
-		)
+func retryAfter(ran, current time.Duration) time.Duration {
+	if ran >= connectedMin {
+		return minRetry
+	}
+	next := current * 2
+	if next > maxRetry || next < current {
+		return maxRetry
+	}
+	return next
+}
 
-		stdoutPipe, err := cmd.StdoutPipe()
-		if err != nil {
-			w.mu.Unlock()
-			slog.Error("failed to create stdout pipe", "stream_id", w.cfg.ID, "error", err)
-			time.Sleep(1 * time.Second)
-			continue
-		}
-
-		stderrPipe, err := cmd.StderrPipe()
-		if err != nil {
-			w.mu.Unlock()
-			if closeErr := stdoutPipe.Close(); closeErr != nil {
-				slog.Warn("failed to close stdout pipe", "stream_id", w.cfg.ID, "error", closeErr)
-			}
-			slog.Error("failed to create stderr pipe", "stream_id", w.cfg.ID, "error", err)
-			time.Sleep(1 * time.Second)
-			continue
-		}
-
-		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-		w.cmd = cmd
-		w.mu.Unlock()
-
-		slog.Info("starting ffmpeg", "stream_id", w.cfg.ID)
-		if err := cmd.Start(); err != nil {
-			slog.Error("failed to start ffmpeg", "stream_id", w.cfg.ID, "error", err)
-			if closeErr := stdoutPipe.Close(); closeErr != nil {
-				slog.Warn("failed to close stdout pipe", "stream_id", w.cfg.ID, "error", closeErr)
-			}
-			if closeErr := stderrPipe.Close(); closeErr != nil {
-				slog.Warn("failed to close stderr pipe", "stream_id", w.cfg.ID, "error", closeErr)
-			}
-			w.mu.Lock()
-			w.running = false
-			w.mu.Unlock()
-			time.Sleep(1 * time.Second)
-			continue
-		}
-
-		// Create log writers to capture ffmpeg output.
-		stdoutWriter := &StreamLogWriter{
-			streamID: w.cfg.ID,
-			writer:   os.Stdout,
-		}
-		stderrWriter := &StreamLogWriter{
-			streamID: w.cfg.ID,
-			writer:   os.Stderr,
-		}
-
-		// Start goroutines to continuously capture logs.
-		var wg sync.WaitGroup
-		wg.Add(2)
-
-		go func() {
-			defer wg.Done()
-			defer func() {
-				if closeErr := stdoutPipe.Close(); closeErr != nil {
-					slog.Warn("failed to close stdout pipe", "stream_id", w.cfg.ID, "error", closeErr)
-				}
-			}()
-			if _, err := io.Copy(stdoutWriter, stdoutPipe); err != nil {
-				slog.Warn("failed to copy stdout", "stream_id", w.cfg.ID, "error", err)
-			}
-		}()
-
-		go func() {
-			defer wg.Done()
-			defer func() {
-				if closeErr := stderrPipe.Close(); closeErr != nil {
-					slog.Warn("failed to close stderr pipe", "stream_id", w.cfg.ID, "error", closeErr)
-				}
-			}()
-			if _, err := io.Copy(stderrWriter, stderrPipe); err != nil {
-				slog.Warn("failed to copy stderr", "stream_id", w.cfg.ID, "error", err)
-			}
-		}()
-
-		err = cmd.Wait()
-		wg.Wait() // Wait for log capture goroutines to finish.
-
-		w.mu.Lock()
-		w.running = false
-		w.mu.Unlock()
-
-		if err != nil {
-			slog.Error("ffmpeg error", "stream_id", w.cfg.ID, "error", err)
-		}
-		slog.Info("stream ended, retry in 1s", "stream_id", w.cfg.ID)
-		time.Sleep(1 * time.Second)
+func (w *StreamWorker) stoppedRequested() bool {
+	select {
+	case <-w.stop:
+		return true
+	default:
+		return false
 	}
 }
 
-// Start 启动流工作器，在独立的 goroutine 中运行。
-func (w *StreamWorker) Start() { go w.startLoop() }
-
-// IsRunning 检查流工作器是否正在运行。
-func (w *StreamWorker) IsRunning() bool {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	return w.running
+// sleepOrStop waits for d. It returns false when Stop was requested.
+func (w *StreamWorker) sleepOrStop(d time.Duration) bool {
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-w.stop:
+		return false
+	case <-timer.C:
+		return true
+	}
 }
 
-// ForceKill 强制终止流工作器及其关联的 ffmpeg 进程。
-// 会先尝试终止整个进程组，如果失败则直接终止进程。
-func (w *StreamWorker) ForceKill() {
+func copyPipe(streamID string, pipe io.ReadCloser, dst io.Writer) {
+	defer func() {
+		if err := pipe.Close(); err != nil && !errors.Is(err, os.ErrClosed) {
+			slog.Warn("close ffmpeg pipe", "stream_id", streamID, "error", err)
+		}
+	}()
+	writer := &StreamLogWriter{streamID: streamID, writer: dst}
+	if _, err := io.Copy(writer, pipe); err != nil {
+		slog.Warn("copy ffmpeg output", "stream_id", streamID, "error", err)
+	}
+}
+
+func closeRead(c io.Closer) {
+	if err := c.Close(); err != nil && !errors.Is(err, os.ErrClosed) {
+		slog.Warn("close pipe", "error", err)
+	}
+}
+
+func parseOutTime(v string) (time.Duration, bool) {
+	parts := strings.SplitN(v, ":", 3)
+	if len(parts) != 3 {
+		return 0, false
+	}
+	hour, err1 := strconv.Atoi(parts[0])
+	min, err2 := strconv.Atoi(parts[1])
+	sec, err3 := strconv.ParseFloat(parts[2], 64)
+	if err1 != nil || err2 != nil || err3 != nil {
+		return 0, false
+	}
+	d := time.Duration(hour)*time.Hour + time.Duration(min)*time.Minute + time.Duration(sec*float64(time.Second))
+	return d, true
+}
+
+func rtmpAddr(src string) (string, error) {
+	u, err := url.Parse(src)
+	if err != nil || u.Hostname() == "" {
+		return "", fmt.Errorf("bad source url")
+	}
+	port := u.Port()
+	if port == "" {
+		port = "1935"
+	}
+	return net.JoinHostPort(u.Hostname(), port), nil
+}
+
+// dialSource times one TCP handshake to the source host.
+// ponytail: fresh connect, not the live RTMP socket RTT. Use that socket's TCP_INFO if this number disagrees with the path.
+func dialSource(src string) (string, error) {
+	addr, err := rtmpAddr(src)
+	if err != nil {
+		return "", err
+	}
+	start := time.Now()
+	conn, err := net.DialTimeout("tcp", addr, dialTimeout)
+	if err != nil {
+		return "", err
+	}
+	ms := fmt.Sprintf("%.0f", float64(time.Since(start))/float64(time.Millisecond))
+	if err := conn.Close(); err != nil {
+		return ms, nil
+	}
+	return ms, nil
+}
+
+// readProgress logs source pace and a TCP handshake time to the source host.
+// behind_s grows when media arrives slower than realtime. dial_ms is path delay.
+func readProgress(streamID string, r io.Reader, now func() time.Time, probe func() (string, error)) {
+	sc := bufio.NewScanner(r)
+	var (
+		media     time.Duration
+		haveMedia bool
+		speed     string
+		fps       string
+		wall0     time.Time
+		media0    time.Duration
+		lastWall  time.Time
+		haveBase  bool
+	)
+	for sc.Scan() {
+		key, val, ok := strings.Cut(sc.Text(), "=")
+		if !ok {
+			continue
+		}
+		switch key {
+		case "out_time_us":
+			n, err := strconv.ParseInt(val, 10, 64)
+			if err != nil {
+				continue
+			}
+			media = time.Duration(n) * time.Microsecond
+			haveMedia = true
+		case "out_time":
+			if haveMedia {
+				continue
+			}
+			d, ok := parseOutTime(val)
+			if !ok {
+				continue
+			}
+			media = d
+			haveMedia = true
+		case "fps":
+			fps = val
+		case "speed":
+			speed = strings.TrimSpace(val)
+		case "progress":
+			if (val != "continue" && val != "end") || !haveMedia {
+				continue
+			}
+			t := now()
+			if !haveBase {
+				wall0, media0, lastWall, haveBase = t, media, t, true
+			}
+			behind := t.Sub(wall0) - (media - media0)
+			gap := t.Sub(lastWall)
+			lastWall = t
+			dialMS, dialErr := probe()
+			attrs := []any{
+				"stream_id", streamID,
+				"behind_s", fmt.Sprintf("%.1f", behind.Seconds()),
+				"speed", speed,
+				"fps", fps,
+				"gap_s", fmt.Sprintf("%.1f", gap.Seconds()),
+				"dial_ms", dialMS,
+			}
+			if dialErr != nil {
+				attrs = append(attrs, "dial_error", dialErr.Error())
+			}
+			if behind >= lagWarn || gap > statsPeriod*2 {
+				slog.Warn("source lagging", attrs...)
+			} else {
+				slog.Info("source pace", attrs...)
+			}
+			haveMedia = false
+			speed, fps = "", ""
+		}
+	}
+}
+
+// runOnce starts ffmpeg and waits for it. The caller retries unless Stop was requested.
+func (w *StreamWorker) runOnce() (time.Duration, error) {
+	cmd := startFFmpeg(w.cfg.Src, w.cfg.Dst)
+	stdoutPipe, err := cmd.StdoutPipe()
+	if err != nil {
+		return 0, err
+	}
+	stderrPipe, err := cmd.StderrPipe()
+	if err != nil {
+		closeRead(stdoutPipe)
+		return 0, err
+	}
+	progressR, progressW, err := os.Pipe()
+	if err != nil {
+		closeRead(stdoutPipe)
+		closeRead(stderrPipe)
+		return 0, err
+	}
+	cmd.ExtraFiles = []*os.File{progressW}
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+
 	w.mu.Lock()
-	defer w.mu.Unlock()
-	if w.cmd == nil || w.cmd.Process == nil {
-		w.running = false
+	if w.stoppedRequested() {
+		w.mu.Unlock()
+		closeRead(stdoutPipe)
+		closeRead(stderrPipe)
+		closeRead(progressR)
+		closeRead(progressW)
+		return 0, nil
+	}
+	w.cmd = cmd
+	w.mu.Unlock()
+
+	slog.Info("starting ffmpeg", "stream_id", w.cfg.ID)
+	started := time.Now()
+	if err := cmd.Start(); err != nil {
+		closeRead(stdoutPipe)
+		closeRead(stderrPipe)
+		closeRead(progressR)
+		closeRead(progressW)
+		w.mu.Lock()
+		w.cmd = nil
+		w.mu.Unlock()
+		return 0, err
+	}
+	closeRead(progressW)
+	if w.stoppedRequested() {
+		w.kill()
+	}
+
+	var wg sync.WaitGroup
+	wg.Add(3)
+	go func() {
+		defer wg.Done()
+		copyPipe(w.cfg.ID, stdoutPipe, os.Stdout)
+	}()
+	go func() {
+		defer wg.Done()
+		copyPipe(w.cfg.ID, stderrPipe, os.Stderr)
+	}()
+	go func() {
+		defer wg.Done()
+		defer closeRead(progressR)
+		readProgress(w.cfg.ID, progressR, time.Now, func() (string, error) {
+			return dialSource(w.cfg.Src)
+		})
+	}()
+
+	err = cmd.Wait()
+	wg.Wait()
+
+	w.mu.Lock()
+	w.cmd = nil
+	w.mu.Unlock()
+	return time.Since(started), err
+}
+
+// startLoop pulls the stream again after every ffmpeg exit until Stop.
+func (w *StreamWorker) startLoop() {
+	defer close(w.stopped)
+	backoff := minRetry
+	for {
+		if w.stoppedRequested() {
+			return
+		}
+		ran, err := w.runOnce()
+		if w.stoppedRequested() {
+			return
+		}
+		if err != nil {
+			slog.Error("ffmpeg exited", "stream_id", w.cfg.ID, "error", err, "retry_in", backoff.String())
+		} else {
+			slog.Info("ffmpeg exited", "stream_id", w.cfg.ID, "retry_in", backoff.String())
+		}
+		if !w.sleepOrStop(backoff) {
+			return
+		}
+		backoff = retryAfter(ran, backoff)
+	}
+}
+
+// Start begins the retry loop.
+func (w *StreamWorker) Start() {
+	w.mu.Lock()
+	w.stop = make(chan struct{})
+	w.stopped = make(chan struct{})
+	w.mu.Unlock()
+	go w.startLoop()
+}
+
+func (w *StreamWorker) kill() {
+	w.mu.Lock()
+	cmd := w.cmd
+	w.mu.Unlock()
+	if cmd == nil || cmd.Process == nil {
 		return
 	}
-	pid := w.cmd.Process.Pid
-	slog.Info("force killing process", "stream_id", w.cfg.ID, "pid", pid)
-	if err := syscall.Kill(-pid, syscall.SIGKILL); err != nil {
-		slog.Warn("kill failed, trying direct kill", "stream_id", w.cfg.ID, "error", err)
-		if killErr := syscall.Kill(pid, syscall.SIGKILL); killErr != nil {
-			slog.Warn("direct kill also failed", "stream_id", w.cfg.ID, "error", killErr)
+	pid := cmd.Process.Pid
+	slog.Info("killing ffmpeg", "stream_id", w.cfg.ID, "pid", pid)
+	if err := syscall.Kill(-pid, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
+		slog.Warn("kill process group failed", "stream_id", w.cfg.ID, "error", err)
+		if err := syscall.Kill(pid, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
+			slog.Warn("kill process failed", "stream_id", w.cfg.ID, "error", err)
 		}
 	}
-	if waitErr := w.cmd.Wait(); waitErr != nil {
-		// Process already killed, ignore wait error
-		_ = waitErr
-	}
-	w.running = false
 }
 
-// loadConfig 从指定路径加载配置文件。
+// Stop ends the retry loop and kills ffmpeg. It does not wait on the process;
+// startLoop owns Cmd.Wait.
+func (w *StreamWorker) Stop() {
+	w.mu.Lock()
+	if w.stop == nil {
+		w.mu.Unlock()
+		return
+	}
+	select {
+	case <-w.stop:
+	default:
+		close(w.stop)
+	}
+	w.mu.Unlock()
+	w.kill()
+	<-w.stopped
+}
+
+func validateConfig(cfg *Config) error {
+	seen := make(map[string]struct{}, len(cfg.Streams))
+	for i, s := range cfg.Streams {
+		if strings.TrimSpace(s.ID) == "" || strings.TrimSpace(s.Src) == "" || strings.TrimSpace(s.Dst) == "" {
+			return fmt.Errorf("stream %d: id, src and dst are required", i)
+		}
+		if _, ok := seen[s.ID]; ok {
+			return fmt.Errorf("duplicate stream id %q", s.ID)
+		}
+		seen[s.ID] = struct{}{}
+	}
+	return nil
+}
+
 func loadConfig(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -263,11 +467,12 @@ func loadConfig(path string) (*Config, error) {
 	if err := yaml.Unmarshal(data, &cfg); err != nil {
 		return nil, err
 	}
+	if err := validateConfig(&cfg); err != nil {
+		return nil, err
+	}
 	return &cfg, nil
 }
 
-// writePID 将当前进程的 PID 写入 PID 文件。
-// 如果文件不存在会自动创建，如果写入失败会终止程序。
 func writePID() {
 	if err := os.MkdirAll("/var/run", 0755); err != nil {
 		slog.Error("cannot create /var/run directory", "error", err)
@@ -279,246 +484,239 @@ func writePID() {
 		os.Exit(1)
 	}
 	if _, err := fmt.Fprintf(f, "%d\n", os.Getpid()); err != nil {
-		// Close file before exit since defer won't run
 		if closeErr := f.Close(); closeErr != nil {
 			slog.Warn("failed to close pid file", "error", closeErr)
 		}
 		slog.Error("failed to write pid", "error", err)
 		os.Exit(1)
 	}
-	// Close file normally
-	if closeErr := f.Close(); closeErr != nil {
-		slog.Warn("failed to close pid file", "error", closeErr)
+	if err := f.Close(); err != nil {
+		slog.Warn("failed to close pid file", "error", err)
 	}
 }
 
-// rotateLog 检查日志文件大小，如果超过限制则进行轮转。
-// 轮转策略：将当前日志重命名为 .1，旧的 .1 重命名为 .2，以此类推。
-func rotateLog() error {
-	info, err := os.Stat(LogFile)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil // File doesn't exist yet, no need to rotate.
-		}
-		return err
-	}
-
-	if info.Size() < MaxLogSize {
-		return nil // File is not large enough.
-	}
-
-	// Rotate existing logs.
-	for i := MaxLogFiles - 1; i >= 1; i-- {
-		oldFile := fmt.Sprintf("%s.%d", LogFile, i)
-		newFile := fmt.Sprintf("%s.%d", LogFile, i+1)
-		if _, err := os.Stat(oldFile); err == nil {
-			if renameErr := os.Rename(oldFile, newFile); renameErr != nil {
-				return fmt.Errorf("failed to rename log file %s to %s: %w", oldFile, newFile, renameErr)
-			}
-		}
-	}
-
-	// Move current log to .1.
-	backupFile := fmt.Sprintf("%s.1", LogFile)
-	if err := os.Rename(LogFile, backupFile); err != nil {
-		return fmt.Errorf("failed to rename current log file to %s: %w", backupFile, err)
-	}
-	return nil
-}
-
-// initLog 初始化日志系统，创建日志目录和日志文件。
-// 如果日志文件超过大小限制会先进行轮转。
-// 如果初始化失败会 panic。
-func initLog() *slog.Logger {
-	if err := os.MkdirAll(LogDir, 0755); err != nil {
-		panic(fmt.Errorf("failed to create log directory: %w", err))
-	}
-
-	// Rotate log if needed (before opening new file).
-	if err := rotateLog(); err != nil {
-		// Log rotation failure is not critical, log warning and continue
-		slog.Warn("log rotation failed", "error", err)
-	}
-
-	f, err := os.OpenFile(LogFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
-	if err != nil {
-		panic(fmt.Errorf("failed to open log file: %w", err))
-	}
-
-	// Create JSON format handler (recommended for production).
-	opts := &slog.HandlerOptions{
-		Level:     slog.LevelInfo,
-		AddSource: true, // Add source code location.
-	}
-	handler := slog.NewJSONHandler(f, opts)
-	logger := slog.New(handler)
-
-	// Set as default logger.
-	slog.SetDefault(logger)
-
-	return logger
-}
-
-// cleanupPID 清理 PID 文件。
-// 如果文件不存在则忽略错误。
 func cleanupPID() {
 	if err := os.Remove(PIDFilePath); err != nil && !os.IsNotExist(err) {
 		slog.Warn("failed to remove PID file", "error", err)
 	}
 }
 
-// checkFFmpeg 检查系统中是否安装了 ffmpeg 并可以执行。
-// 如果 ffmpeg 不可用则返回错误。
+var (
+	logMu   sync.Mutex
+	logFile *os.File
+)
+
+func shiftLogs(path string) error {
+	for i := MaxLogFiles - 1; i >= 1; i-- {
+		oldFile := fmt.Sprintf("%s.%d", path, i)
+		newFile := fmt.Sprintf("%s.%d", path, i+1)
+		if _, err := os.Stat(oldFile); err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			return err
+		}
+		if err := os.Rename(oldFile, newFile); err != nil {
+			return fmt.Errorf("rename %s: %w", oldFile, err)
+		}
+	}
+	if err := os.Rename(path, path+".1"); err != nil {
+		return fmt.Errorf("rename %s: %w", path, err)
+	}
+	return nil
+}
+
+func rotateIfBig(path string, maxSize int64) (bool, error) {
+	info, err := os.Stat(path)
+	if os.IsNotExist(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if info.Size() < maxSize {
+		return false, nil
+	}
+	if err := shiftLogs(path); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func reopenAt(path string) error {
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	if err != nil {
+		return fmt.Errorf("open log file: %w", err)
+	}
+	old := logFile
+	logFile = f
+	// ponytail: one global log file. Swap then close; an in-flight write during the hourly rotate can hit the closed fd.
+	slog.SetDefault(slog.New(slog.NewJSONHandler(f, &slog.HandlerOptions{
+		Level:     slog.LevelInfo,
+		AddSource: true,
+	})))
+	if old != nil && old != f {
+		if err := old.Close(); err != nil {
+			slog.Warn("close rotated log", "error", err)
+		}
+	}
+	return nil
+}
+
+func syncLog(path string, maxSize int64, forceOpen bool) error {
+	logMu.Lock()
+	defer logMu.Unlock()
+	rotated, err := rotateIfBig(path, maxSize)
+	if err != nil {
+		return err
+	}
+	if _, statErr := os.Stat(path); os.IsNotExist(statErr) {
+		forceOpen = true
+	}
+	if rotated || forceOpen {
+		return reopenAt(path)
+	}
+	return nil
+}
+
+func initLog() error {
+	if err := os.MkdirAll(LogDir, 0755); err != nil {
+		return fmt.Errorf("create log directory: %w", err)
+	}
+	return syncLog(LogFile, MaxLogSize, true)
+}
+
+func closeLog() {
+	logMu.Lock()
+	defer logMu.Unlock()
+	if logFile != nil {
+		if err := logFile.Close(); err != nil {
+			slog.Warn("close log file", "error", err)
+		}
+		logFile = nil
+	}
+}
+
 func checkFFmpeg() error {
 	cmd := exec.Command("ffmpeg", "-version")
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("ffmpeg not found or not executable: %v", err)
 	}
-
-	// Extract version from output (first line usually contains version info).
 	lines := strings.Split(string(output), "\n")
 	if len(lines) > 0 {
 		if _, err := fmt.Fprintf(os.Stderr, "[*] FFmpeg detected: %s\n", strings.TrimSpace(lines[0])); err != nil {
-			// Non-critical error, just log it
 			slog.Warn("failed to write ffmpeg version to stderr", "error", err)
 		}
 	}
 	return nil
 }
 
-// reloadConfig 重新加载配置文件并更新流工作器。
-// 会停止已删除的流，启动新增的流，更新配置变更的流。
+// reloadConfig applies a valid config. A bad file returns before any worker changes.
 func reloadConfig(state *AppState) error {
 	cfg, err := loadConfig(ConfigPath)
 	if err != nil {
-		return fmt.Errorf("load config failed: %v", err)
+		return fmt.Errorf("load config: %w", err)
 	}
+
+	type change struct {
+		id    string
+		stop  *StreamWorker
+		start *StreamWorker
+	}
+	var changes []change
 
 	state.mu.Lock()
-	defer state.mu.Unlock()
-
-	// Stop and remove workers that are no longer in config.
-	for id, w := range state.workers {
-		found := false
-		for _, s := range cfg.Streams {
-			if s.ID == id {
-				found = true
-				break
-			}
-		}
-		if !found {
-			slog.Info("removing worker", "stream_id", id)
-			w.ForceKill()
-			delete(state.workers, id)
-		}
-	}
-
-	// Add or update workers.
+	keep := make(map[string]bool, len(cfg.Streams))
 	for _, s := range cfg.Streams {
-		if w, exists := state.workers[s.ID]; exists {
-			// Update config if changed.
+		if w, ok := state.workers[s.ID]; ok {
+			keep[s.ID] = true
 			if w.cfg.Src != s.Src || w.cfg.Dst != s.Dst {
-				slog.Info("updating worker", "stream_id", s.ID)
-				w.ForceKill()
-				w.cfg = s
-				w.Start()
+				changes = append(changes, change{id: s.ID, stop: w, start: &StreamWorker{cfg: s}})
 			}
-		} else {
-			// New worker.
-			slog.Info("adding new worker", "stream_id", s.ID)
-			w := &StreamWorker{cfg: s}
-			state.workers[s.ID] = w
-			w.Start()
+			continue
+		}
+		changes = append(changes, change{id: s.ID, start: &StreamWorker{cfg: s}})
+	}
+	for id, w := range state.workers {
+		if !keep[id] {
+			changes = append(changes, change{id: id, stop: w})
 		}
 	}
+	for _, c := range changes {
+		if c.start != nil {
+			state.workers[c.id] = c.start
+		} else {
+			delete(state.workers, c.id)
+		}
+	}
+	state.mu.Unlock()
 
+	for _, c := range changes {
+		if c.stop != nil {
+			slog.Info("stopping stream", "stream_id", c.id)
+			c.stop.Stop()
+		}
+	}
+	for _, c := range changes {
+		if c.start != nil {
+			slog.Info("starting stream", "stream_id", c.id)
+			c.start.Start()
+		}
+	}
 	return nil
 }
 
-// run 是应用程序的主逻辑入口，返回退出码。
-// 使用 return 而不是 os.Exit，确保 defer 语句能正常执行。
+func stopWorkers(state *AppState) {
+	state.mu.Lock()
+	workers := make([]*StreamWorker, 0, len(state.workers))
+	for _, w := range state.workers {
+		workers = append(workers, w)
+	}
+	state.mu.Unlock()
+	for _, w := range workers {
+		w.Stop()
+	}
+}
+
 func run() int {
-	// Check ffmpeg availability before starting.
 	if err := checkFFmpeg(); err != nil {
-		if _, printErr := fmt.Fprintf(os.Stderr, "ERROR: %v\n", err); printErr != nil {
-			slog.Error("failed to print error to stderr", "error", printErr)
+		if _, werr := fmt.Fprintf(os.Stderr, "ERROR: %v\n", err); werr != nil {
+			return 1
 		}
 		return 1
 	}
-
-	logger := initLog()
-	defer func() {
-		// Logger will handle file closing when done.
-		_ = logger
-	}()
+	if err := initLog(); err != nil {
+		if _, werr := fmt.Fprintf(os.Stderr, "ERROR: %v\n", err); werr != nil {
+			return 1
+		}
+		return 1
+	}
+	defer closeLog()
 
 	writePID()
 	defer cleanupPID()
 
-	// Setup signal handlers.
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
-
 	slog.Info("stream-runner starting")
 
-	state := &AppState{
-		workers: make(map[string]*StreamWorker),
-		logger:  logger,
-	}
-
-	// Initial config load.
+	state := &AppState{workers: make(map[string]*StreamWorker)}
 	if err := reloadConfig(state); err != nil {
 		slog.Error("initial config load failed", "error", err)
 		return 1
 	}
 
-	// Watchdog goroutine monitors and restarts stopped workers.
 	go func() {
-		time.Sleep(10 * time.Second) // Give workers time to start.
-		for {
-			time.Sleep(5 * time.Second)
-			state.mu.RLock()
-			for id, w := range state.workers {
-				if !w.IsRunning() {
-					slog.Warn("worker not running, force kill & restart", "stream_id", id)
-					w.ForceKill()
-					time.Sleep(1 * time.Second) // Wait before next check.
-				}
-			}
-			state.mu.RUnlock()
-		}
-	}()
-
-	// Log rotation checker runs periodically.
-	go func() {
-		ticker := time.NewTicker(1 * time.Hour)
+		ticker := time.NewTicker(time.Hour)
 		defer ticker.Stop()
 		for range ticker.C {
-			if err := rotateLog(); err != nil {
-				slog.Error("log rotation check failed", "error", err)
-			} else {
-				// Check if rotation actually happened (file was renamed).
-				if info, err := os.Stat(LogFile); err == nil && info.Size() == 0 {
-					// File was rotated, reopen it.
-					newFile, err := os.OpenFile(LogFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
-					if err == nil {
-						opts := &slog.HandlerOptions{
-							Level:     slog.LevelInfo,
-							AddSource: true,
-						}
-						handler := slog.NewJSONHandler(newFile, opts)
-						state.mu.Lock()
-						state.logger = slog.New(handler)
-						slog.SetDefault(state.logger)
-						state.mu.Unlock()
-					}
-				}
+			if err := syncLog(LogFile, MaxLogSize, false); err != nil {
+				slog.Error("log rotation failed", "error", err)
 			}
 		}
 	}()
 
-	// Main signal loop handles SIGHUP (reload) and SIGINT/SIGTERM (shutdown).
 	for {
 		sig := <-sigChan
 		switch sig {
@@ -527,16 +725,11 @@ func run() int {
 			if err := reloadConfig(state); err != nil {
 				slog.Error("config reload failed", "error", err)
 			} else {
-				slog.Info("config reloaded successfully")
+				slog.Info("config reloaded")
 			}
 		case syscall.SIGINT, syscall.SIGTERM:
-			slog.Info("received termination signal, shutting down")
-			state.mu.Lock()
-			for id, w := range state.workers {
-				slog.Info("stopping worker", "stream_id", id)
-				w.ForceKill()
-			}
-			state.mu.Unlock()
+			slog.Info("shutting down")
+			stopWorkers(state)
 			return 0
 		}
 	}

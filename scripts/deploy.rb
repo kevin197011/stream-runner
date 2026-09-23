@@ -47,6 +47,7 @@ service_file = <<~SERVICE
   [Service]
   Type=simple
   ExecStart=/usr/local/bin/stream-runner
+  ExecReload=/bin/kill -HUP $MAINPID
   Restart=always
   RestartSec=5
   PIDFile=/var/run/stream-runner.pid

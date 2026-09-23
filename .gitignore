@@ -5,3 +5,4 @@ dist/
 
 # GitHub Actions
 !.github/workflows/
+*.log

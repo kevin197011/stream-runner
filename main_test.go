@@ -2,10 +2,14 @@ package main
 
 import (
 	"bytes"
+	"log/slog"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -105,48 +109,148 @@ func TestLoadConfigInvalidYAML(t *testing.T) {
 	}
 }
 
-// TestStreamWorkerIsRunning 测试 StreamWorker 的 IsRunning 方法
-func TestStreamWorkerIsRunning(t *testing.T) {
-	worker := &StreamWorker{
-		cfg: StreamConfig{
-			ID:  "test-stream",
-			Src: "rtmp://source.com/live",
-			Dst: "rtmp://dest.com/live",
-		},
-		running: false,
+func TestRetryAfter(t *testing.T) {
+	if retryAfter(connectedMin, 16*time.Second) != minRetry {
+		t.Fatal("a run that reached connectedMin should reset the delay")
 	}
-
-	if worker.IsRunning() {
-		t.Error("expected worker to not be running initially")
+	if retryAfter(rwTimeout, time.Second) != 2*time.Second {
+		t.Fatal("a failed open at the read timeout should double the delay")
+	}
+	if retryAfter(time.Second, maxRetry) != maxRetry {
+		t.Fatal("delay should cap")
 	}
 }
 
-// TestRotateLog 测试日志轮转功能
-func TestRotateLog(t *testing.T) {
-	tmpDir := t.TempDir()
-	logFile := filepath.Join(tmpDir, "test.log")
+func TestLoadConfigRejectsDuplicateID(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "streams.yml")
+	body := `streams:
+  - id: same
+    src: rtmp://a/live
+    dst: rtmp://b/live
+  - id: same
+    src: rtmp://c/live
+    dst: rtmp://d/live
+`
+	if err := os.WriteFile(path, []byte(body), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loadConfig(path); err == nil {
+		t.Fatal("expected duplicate id to fail")
+	}
+}
 
-	// 创建一个大文件（模拟需要轮转的情况）
-	largeContent := make([]byte, MaxLogSize+1)
-	for i := range largeContent {
-		largeContent[i] = 'a'
+func TestWorkerRestartsUntilStop(t *testing.T) {
+	orig := startFFmpeg
+	var starts atomic.Int32
+	startFFmpeg = func(src, dst string) *exec.Cmd {
+		if starts.Add(1) == 1 {
+			return exec.Command("sleep", "0.2")
+		}
+		return exec.Command("sleep", "30")
+	}
+	t.Cleanup(func() { startFFmpeg = orig })
+
+	w := &StreamWorker{cfg: StreamConfig{ID: "t", Src: "a", Dst: "b"}}
+	w.Start()
+	deadline := time.Now().Add(4 * time.Second)
+	for starts.Load() < 2 && time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
+	}
+	if starts.Load() < 2 {
+		t.Fatalf("ffmpeg was not restarted, starts=%d", starts.Load())
 	}
 
-	if err := os.WriteFile(logFile, largeContent, 0644); err != nil {
-		t.Fatalf("failed to create test log file: %v", err)
-	}
-
-	// 临时修改 LogFile 常量（通过环境变量或函数参数）
-	// 由于 LogFile 是常量，我们需要创建一个测试函数
-	originalLogFile := LogFile
-	defer func() {
-		// 恢复原始值（虽然常量不能修改，但这里只是演示测试思路）
-		_ = originalLogFile
+	done := make(chan struct{})
+	go func() {
+		w.Stop()
+		close(done)
 	}()
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("Stop hung")
+	}
+	got := starts.Load()
+	time.Sleep(1500 * time.Millisecond)
+	if starts.Load() != got {
+		t.Fatalf("worker restarted after Stop: %d -> %d", got, starts.Load())
+	}
+}
 
-	// 注意：由于 rotateLog 使用全局常量 LogFile，这个测试需要重构代码
-	// 或者创建一个接受路径参数的版本
-	// 这里仅作为测试示例
+func TestProgressWarnsWhenSourceFallsBehind(t *testing.T) {
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	base := time.Date(2026, 9, 23, 10, 0, 0, 0, time.UTC)
+	times := []time.Time{base, base.Add(20 * time.Second)}
+	var i int
+	now := func() time.Time {
+		if i >= len(times) {
+			return times[len(times)-1]
+		}
+		ts := times[i]
+		i++
+		return ts
+	}
+	in := strings.NewReader(strings.Join([]string{
+		"out_time_us=0",
+		"fps=25.0",
+		"speed=1.0x",
+		"progress=continue",
+		"out_time_us=10000000",
+		"fps=12.0",
+		"speed=0.50x",
+		"progress=continue",
+		"",
+	}, "\n"))
+	readProgress("cam-1", in, now, func() (string, error) { return "18", nil })
+	out := buf.String()
+	if !strings.Contains(out, "source lagging") || !strings.Contains(out, "cam-1") || !strings.Contains(out, "behind_s=10.0") || !strings.Contains(out, "dial_ms=18") {
+		t.Fatalf("log:\n%s", out)
+	}
+}
+
+func TestRTMPAddr(t *testing.T) {
+	addr, err := rtmpAddr("rtmp://kkw-lb.example/tz32/8-321")
+	if err != nil || addr != "kkw-lb.example:1935" {
+		t.Fatalf("addr=%q err=%v", addr, err)
+	}
+}
+
+func TestLogRotateReopensFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "stream.log")
+	prev := slog.Default()
+	t.Cleanup(func() {
+		slog.SetDefault(prev)
+		logMu.Lock()
+		if logFile != nil {
+			_ = logFile.Close()
+			logFile = nil
+		}
+		logMu.Unlock()
+	})
+
+	if err := syncLog(path, 32, true); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, bytes.Repeat([]byte("a"), 64), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := syncLog(path, 32, false); err != nil {
+		t.Fatal(err)
+	}
+	slog.Info("after-rotate")
+	body, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(body, []byte("after-rotate")) {
+		t.Fatalf("new log missing marker: %s", body)
+	}
 }
 
 // TestStreamLogWriter 测试 StreamLogWriter
