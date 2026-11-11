@@ -1,0 +1,7 @@
+streams:
+  - id: stream-1
+    src: rtmp://example.com/live/stream1
+    dst: rtmp://127.0.0.1:1936/live/stream1
+  - id: stream-2
+    src: rtmp://example.com/live/stream2
+    dst: rtmp://127.0.0.1:1936/live/stream2

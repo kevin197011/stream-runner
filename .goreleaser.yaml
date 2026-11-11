@@ -1,0 +1,82 @@
+# Copyright (c) 2026 kk
+# yaml-language-server: $schema=https://goreleaser.com/static/schema.json
+
+version: 2
+
+project_name: stream-runner
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: stream-runner
+    main: ./cmd/stream-runner
+    binary: stream-runner
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w
+
+archives:
+  - id: default
+    formats:
+      - tar.gz
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    files:
+      - LICENSE
+      - README.md
+      - config/streams.yml
+      - systemd/stream-runner.service
+
+checksum:
+  name_template: checksums.txt
+
+nfpms:
+  - id: packages
+    package_name: stream-runner
+    file_name_template: "{{ .PackageName }}_{{ .Version }}_{{ .Arch }}"
+    vendor: kk
+    homepage: https://github.com/kevin197011/stream-runner
+    maintainer: kk <kevin197011@outlook.com>
+    description: |-
+      RTMP Stream Runner
+      Manage and forward RTMP streams with reconnect and config reload.
+    license: MIT
+    formats:
+      - deb
+      - rpm
+    bindir: /usr/local/bin
+    section: utils
+    priority: optional
+    dependencies:
+      - ffmpeg
+    contents:
+      - src: config/streams.yml
+        dst: /usr/share/stream-runner/streams.yml
+      - src: systemd/stream-runner.service
+        dst: /etc/systemd/system/stream-runner.service
+      - src: LICENSE
+        dst: /usr/share/doc/stream-runner/LICENSE
+    # Install/enable/restart is done by deploy.sh (not package hooks).
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"
+
+release:
+  github:
+    owner: kevin197011
+    name: stream-runner
+  draft: false
+  prerelease: auto
+  name_template: "v{{.Version}}"

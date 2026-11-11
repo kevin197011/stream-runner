@@ -4,98 +4,59 @@
 
 ## 功能特性
 
-- ✅ **多路流管理**：支持同时管理多个 RTMP 流
-- ✅ **自动重连**：ffmpeg 退出后自动再拉。源打不开时重试从 1 秒退避到 30 秒，避免源离线时每隔几秒拉起一次进程。连续播放超过 20 秒后再断，1 秒后重拉
-- ✅ **配置热重载**：支持 SIGHUP 信号动态重载配置，无需重启服务
-- ✅ **日志捕获**：ffmpeg 警告和错误打到标准输出（systemd 下看 journal），带时间戳和流 ID。服务自己的日志是 JSON，写在 `stream.log`
-- ✅ **日志轮转**：`stream.log` 超过 100MB 轮转，保留 5 个文件，轮转后重新打开文件
-- ✅ **系统服务**：支持 systemd 服务管理
-- ✅ **进程管理**：支持 PID 文件管理和进程组管理
+- 多路 RTMP 拷贝（ffmpeg `-c copy`）
+- 自动重连：短失败 1s→30s 退避；连续播放 ≥20s 后再断则 1s 重拉
+- SIGHUP / `systemctl reload` 热重载配置
+- JSON 服务日志按日轮转（默认保留 30 天）；ffmpeg 输出进 journal
+- systemd 打包（deb/rpm）+ PID / 进程组管理
 
 ## 系统要求
 
 - Linux 系统（推荐）
-- Go 1.21 或更高版本（用于构建）
+- Go 1.27 或更高版本（用于构建）
 - ffmpeg（运行时必需）
 - systemd（用于服务管理，可选）
 
-## 安装和构建
+## 安装 / 卸载
+
+Linux 一键（从 GitHub Release 拉 deb/rpm，失败再落 tar.gz）：
+
+```bash
+# 安装或覆盖升级
+curl -fsSL https://raw.githubusercontent.com/kevin197011/stream-runner/main/deploy.sh | sudo bash
+
+# 指定版本
+SR_VERSION=v1.0.0 curl -fsSL https://raw.githubusercontent.com/kevin197011/stream-runner/main/deploy.sh | sudo bash
+
+# 卸载（保留 /etc/stream-runner/streams.yml）
+curl -fsSL https://raw.githubusercontent.com/kevin197011/stream-runner/main/deploy.sh | sudo bash -s -- --uninstall
+```
+
+本地仓库：
+
+```bash
+sudo ./deploy.sh
+sudo ./deploy.sh --uninstall
+```
+
+编辑配置后热加载：
+
+```bash
+sudo nano /etc/stream-runner/streams.yml
+sudo systemctl reload stream-runner
+sudo systemctl status stream-runner
+```
+
+发版：`rake push` / `ruby push.rb` 在提交成功后自动打 semver tag 并推送 → GoReleaser 上传 deb/rpm/tar.gz。  
+只要推代码不发版：`SKIP_TAG=1 rake push`。升 minor/major：`KK_GIT_BUMP=minor rake push`。
 
 ### 本地开发
 
 ```bash
-# 克隆项目
-git clone <repository-url>
+git clone https://github.com/kevin197011/stream-runner.git
 cd stream-runner
-
-# 安装依赖
 go mod tidy
-
-# 构建
-go build -o stream-runner main.go
-```
-
-### 从 GitHub Releases 安装
-
-访问 [Releases](https://github.com/yourorg/stream-runner/releases) 页面下载最新版本：
-
-**Debian/Ubuntu:**
-```bash
-wget https://github.com/yourorg/stream-runner/releases/download/v1.0.0/stream-runner_1.0.0_amd64.deb
-sudo dpkg -i stream-runner_1.0.0_amd64.deb
-```
-
-**RHEL/CentOS:**
-```bash
-wget https://github.com/yourorg/stream-runner/releases/download/v1.0.0/stream-runner-1.0.0-1.x86_64.rpm
-sudo rpm -i stream-runner-1.0.0-1.x86_64.rpm
-```
-
-### 本地打包部署
-
-使用 `scripts/deploy.rb` 脚本在本地生成 Linux 软件包（.deb 和 .rpm）：
-
-```bash
-ruby scripts/deploy.rb
-```
-
-这将生成：
-- `dist/stream-runner_1.0.0_amd64.deb` - Debian/Ubuntu 软件包
-- `dist/stream-runner-1.0.0-1.x86_64.rpm` - RHEL/CentOS 软件包
-
-软件包包含：
-- 二进制文件：`/usr/local/bin/stream-runner`
-- 配置模板：`/usr/share/stream-runner/streams.yml`（仅当 `/etc/stream-runner/streams.yml` 不存在时复制过去，已有文件不覆盖）
-- systemd 服务：`/etc/systemd/system/stream-runner.service`
-
-#### 安装软件包
-
-**Debian/Ubuntu:**
-```bash
-sudo dpkg -i dist/stream-runner_*.deb
-```
-
-**RHEL/CentOS:**
-```bash
-sudo rpm -i dist/stream-runner-*.rpm
-```
-
-安装后会自动：
-- 启用 systemd 服务
-- 创建 `/etc/stream-runner`
-- 配置文件不存在时，从模板生成 `/etc/stream-runner/streams.yml`
-
-#### 配置
-
-安装后编辑配置文件：
-```bash
-sudo nano /etc/stream-runner/streams.yml
-```
-
-然后启动服务：
-```bash
-sudo systemctl start stream-runner
-sudo systemctl status stream-runner
+go build -o stream-runner ./cmd/stream-runner
 ```
 
 ## 配置说明
@@ -131,24 +92,6 @@ sudo cp config/streams.yml /etc/stream-runner/
 sudo ./stream-runner
 ```
 
-### 作为系统服务运行
-
-```bash
-# 解压部署包
-tar -xzf stream-runner.tar.gz
-cd stream-runner-pkg
-
-# 运行部署脚本
-sudo ./deploy.sh
-```
-
-部署脚本会自动：
-1. 停止旧服务（如果存在）
-2. 复制二进制文件和配置文件
-3. 安装 systemd 服务
-4. 启动服务
-5. 等待 3 秒后测试 API 端点
-
 ### 服务管理
 
 ```bash
@@ -181,6 +124,7 @@ sudo kill -HUP $(cat /var/run/stream-runner.pid)
 ```
 
 重载时会：
+
 - 停止已删除的流
 - 启动新增的流
 - 更新配置变更的流
@@ -190,7 +134,7 @@ sudo kill -HUP $(cat /var/run/stream-runner.pid)
 ### 日志位置
 
 - 主日志文件：`/var/log/stream-runner/stream.log`
-- 轮转日志：`/var/log/stream-runner/stream.log.1`, `.2`, `.3`, `.4`, `.5`
+- 轮转日志：`/var/log/stream-runner/stream.log.YYYY-MM-DD`（默认保留 30 天）
 
 ### 日志格式
 
@@ -202,9 +146,9 @@ sudo kill -HUP $(cat /var/run/stream-runner.pid)
 
 ### 日志轮转
 
-- 当日志文件达到 100MB 时自动轮转
-- 保留最近 5 个日志文件
-- 每小时检查一次是否需要轮转
+- 按本地日历日轮转：跨日时把当前 `stream.log` 改名为 `stream.log.YYYY-MM-DD` 并重新打开
+- 默认保留最近 30 天的按日日志（常量 `LogKeepDays`）
+- 每小时检查一次；启动时也会检查并清理过期文件
 
 ## 信号处理
 
@@ -245,9 +189,9 @@ sudo tail -f /var/log/stream-runner/stream.log
    - 检查配置文件格式是否正确
    - 查看日志文件获取错误详情
 
-3. **日志文件过大**
-   - 日志会自动轮转，但可以手动清理旧日志
-   - 修改 `MaxLogSize` 和 `MaxLogFiles` 常量调整轮转策略
+3. **日志磁盘占用**
+   - 按日轮转后会自动删掉超过保留天数的文件
+   - 修改 `LogKeepDays` 调整保留天数
 
 ## 开发
 
@@ -255,45 +199,28 @@ sudo tail -f /var/log/stream-runner/stream.log
 
 ```
 stream-runner/
-├── main.go              # 主程序
-├── go.mod               # Go 模块定义
-├── go.sum               # 依赖校验和
-├── nfpm.yaml            # nfpm 打包配置
-├── scripts/             # 构建和部署脚本
-│   ├── deploy.rb        # 本地打包脚本
-│   └── nfpm/            # nfpm 安装/卸载脚本
-├── .github/workflows/   # GitHub Actions 工作流
-│   └── release.yml      # 自动构建和发布工作流
-├── Rakefile             # Rake 任务定义
-└── README.md            # 本文档
+├── cmd/stream-runner/
+├── internal/runner/
+├── config/streams.yml
+├── systemd/stream-runner.service
+├── deploy.sh                  # 安装 / 卸载（含配置与 systemd）
+├── .goreleaser.yaml
+├── .github/workflows/release.yml
+├── docs/REQUIREMENTS.md
+└── README.md
 ```
 
-### 构建选项
+详细需求见 [docs/REQUIREMENTS.md](docs/REQUIREMENTS.md)。
+
+### 构建 / 发布
 
 ```bash
-# 本地构建
-go build -o stream-runner main.go
+go build -o stream-runner ./cmd/stream-runner
 
-# 交叉编译（Linux amd64）
-GOOS=linux GOARCH=amd64 go build -o stream-runner main.go
-```
+# 本地试跑 GoReleaser（不上传）
+goreleaser release --snapshot --clean
 
-### GitHub Actions
-
-项目配置了 GitHub Actions 自动构建和发布：
-
-- 在 push 到 main/develop 分支时自动构建
-- 在推送 tag（格式：`v*`）时自动创建 Release 并上传软件包
-
-#### 创建新版本发布
-
-```bash
-# 1. 更新版本号（在 nfpm.yaml 中）
-# 2. 提交更改
-git add .
-git commit -m "chore: bump version to 1.0.1"
-
-# 3. 创建并推送 tag
+# 正式发版
 git tag -a v1.0.1 -m "Release v1.0.1"
 git push origin v1.0.1
 ```
@@ -307,4 +234,3 @@ Copyright (c) 2025 kk
 ## 贡献
 
 欢迎提交 Issue 和 Pull Request。
-

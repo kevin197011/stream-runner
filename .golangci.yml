@@ -1,23 +1,20 @@
-# golangci-lint 配置文件
-# 参考: https://golangci-lint.run/usage/configuration/
+# https://golangci-lint.run/usage/configuration/
 
 linters:
   enable:
-    - errcheck          # 检查错误处理
-    - gosimple          # 简化代码
-    - govet             # Go vet 检查
-    - ineffassign       # 检查无效赋值
-    - staticcheck       # 静态分析
-    - unused            # 检查未使用的代码
-    - gofmt             # 代码格式化
-    - goimports         # import 格式化
-    - gosec             # 安全检查
-    - misspell          # 拼写检查
-    - revive            # Go 代码检查
-    - unconvert         # 检查不必要的类型转换
-    - typecheck         # 类型检查
-    - gocritic          # 代码审查建议
-    - dupl              # 代码重复检查
+    - errcheck
+    - gosimple
+    - govet
+    - ineffassign
+    - staticcheck
+    - unused
+    - gofmt
+    - goimports
+    - gosec
+    - misspell
+    - revive
+    - unconvert
+    - typecheck
 
 linters-settings:
   gofmt:
@@ -38,25 +35,11 @@ linters-settings:
         severity: warning
       - name: package-comments
         severity: warning
-      - name: comment-spacings
-        severity: warning
-      - name: range
-        severity: warning
-      - name: increment-decrement
-        severity: warning
-      - name: var-declaration
-        severity: warning
-  dupl:
-    threshold: 100
 
 issues:
   exclude-use-default: false
-  max-issues-per-linter: 0
-  max-same-issues: 0
   exclude-rules:
-    # 排除测试文件中的某些检查
     - path: _test\.go
       linters:
         - errcheck
         - gosec
-
