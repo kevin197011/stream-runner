@@ -20,7 +20,7 @@ linters-settings:
   gofmt:
     simplify: true
   goimports:
-    local-prefixes: stream-runner
+    local-prefixes: github.com/kevin197011/stream-runner
   errcheck:
     check-type-assertions: true
     check-blank: true

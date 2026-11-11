@@ -40,8 +40,8 @@ jobs:
           git tag -f "v${VERSION}"
           git push -f origin "v${VERSION}"
 
-      - name: Make packaging scripts executable
-        run: chmod +x packaging/*.sh
+      - name: Make deploy scripts executable
+        run: chmod +x deploy.sh
 
       - name: Run GoReleaser
         uses: goreleaser/goreleaser-action@v6

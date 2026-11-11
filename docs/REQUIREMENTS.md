@@ -17,15 +17,15 @@
 
 ## 功能需求
 
-| 编号 | 需求 | 验收标准 |
-| --- | --- | --- |
-| FR-SR-01 | 多路流并发 | `streams.yml` 中多条 `id/src/dst` 各自独立 ffmpeg |
-| FR-SR-02 | 自动重连 | ffmpeg 退出后重拉；短跑失败退避 1s→30s；连续播放 ≥20s 后再断则 1s 重拉 |
-| FR-SR-03 | 配置热重载 | `SIGHUP` / `systemctl reload`：停删改、启新增、换 src/dst；坏配置不改现网 worker |
-| FR-SR-04 | 日志 | 服务 JSON → `stream.log`；ffmpeg 警告/错误带时间戳与 stream id 打到 stdout/stderr |
-| FR-SR-05 | 日志轮转 | 按本地日历日将 `stream.log` 归档为 `stream.log.YYYY-MM-DD`；默认保留 30 天；启动与每小时检查 |
-| FR-SR-06 | 源节奏观测 | 进度管解析 `behind_s` / `speed`；慢握手或落后打 `source lagging` / `pull network` |
-| FR-SR-07 | systemd 打包 | deb/rpm 安装二进制、配置模板、unit；首次安装生成 `/etc` 配置且不覆盖已有 |
+| 编号     | 需求         | 验收标准                                                                                     |
+| -------- | ------------ | -------------------------------------------------------------------------------------------- |
+| FR-SR-01 | 多路流并发   | `streams.yml` 中多条 `id/src/dst` 各自独立 ffmpeg                                            |
+| FR-SR-02 | 自动重连     | ffmpeg 退出后重拉；短跑失败退避 1s→30s；连续播放 ≥20s 后再断则 1s 重拉                       |
+| FR-SR-03 | 配置热重载   | `SIGHUP` / `systemctl reload`：停删改、启新增、换 src/dst；坏配置不改现网 worker             |
+| FR-SR-04 | 日志         | 服务 JSON → `stream.log`；ffmpeg 警告/错误带时间戳与 stream id 打到 stdout/stderr            |
+| FR-SR-05 | 日志轮转     | 按本地日历日将 `stream.log` 归档为 `stream.log.YYYY-MM-DD`；默认保留 30 天；启动与每小时检查 |
+| FR-SR-06 | 源节奏观测   | 进度管解析 `behind_s` / `speed`；慢握手或落后打 `source lagging` / `pull network`            |
+| FR-SR-07 | systemd 打包 | deb/rpm 安装二进制、配置模板、unit；首次安装生成 `/etc` 配置且不覆盖已有                     |
 
 ## 非功能需求
 
@@ -36,6 +36,7 @@
 ## 架构概览
 
 ```
+module github.com/kevin197011/stream-runner
 cmd/stream-runner → internal/runner
   config load → AppState workers → ffmpeg copy (+ progress probe)
   slog JSON file + daily rotate (keep 30d)
@@ -48,9 +49,9 @@ cmd/stream-runner → internal/runner
 
 ```yaml
 streams:
-  - id: string   # unique
-    src: string  # RTMP URL
-    dst: string  # RTMP URL
+  - id: string # unique
+    src: string # RTMP URL
+    dst: string # RTMP URL
 ```
 
 ## API 摘要
@@ -59,16 +60,16 @@ streams:
 
 ## 部署与运维
 
-| 项 | 值 |
-| --- | --- |
-| 二进制 | `/usr/local/bin/stream-runner` |
-| 配置 | `/etc/stream-runner/streams.yml` |
-| 模板 | `/usr/share/stream-runner/streams.yml` |
-| unit | `/etc/systemd/system/stream-runner.service` |
-| 日志 | `/var/log/stream-runner/stream.log` |
-| 打包 | GoReleaser（同 krun）：`v*` tag / workflow_dispatch → Release（tar.gz + deb/rpm） |
-| 安装 | 根目录 `deploy.sh`：装 ffmpeg、落包/解包、写配置、enable/restart；`--uninstall` 停服并卸包 |
-| unit | `systemd/stream-runner.service`（随 Release 打进 deb/rpm/tar.gz） |
+| 项     | 值                                                                                         |
+| ------ | ------------------------------------------------------------------------------------------ |
+| 二进制 | `/usr/local/bin/stream-runner`                                                             |
+| 配置   | `/etc/stream-runner/streams.yml`                                                           |
+| 模板   | `/usr/share/stream-runner/streams.yml`                                                     |
+| unit   | `/etc/systemd/system/stream-runner.service`                                                |
+| 日志   | `/var/log/stream-runner/stream.log`                                                        |
+| 打包   | GoReleaser（同 krun）：`v*` tag / workflow_dispatch → Release（tar.gz + deb/rpm）          |
+| 安装   | 根目录 `deploy.sh`：装 ffmpeg、落包/解包、写配置、enable/restart；`--uninstall` 停服并卸包 |
+| unit   | `systemd/stream-runner.service`（随 Release 打进 deb/rpm/tar.gz）                          |
 
 ## 安全与已知风险
 
@@ -86,17 +87,25 @@ go build -o /tmp/stream-runner ./cmd/stream-runner
 
 ## 变更记录
 
-| 版本 | 日期 | 说明 |
-| --- | --- | --- |
-| 1.0.0 | 2025 | 初版多路拉流、热重载、打包 |
-| — | 2026-11-11 | 代码布局改为 `cmd/` + `internal/runner`；配置与 unit 落盘到仓库 |
-| — | 2026-11-11 | 日志改为按日轮转，默认保留 30 天 |
-| — | 2026-11-11 | 构建基线升到 Go 1.27（当前稳定版 1.27.4） |
-| — | 2026-11-11 | 删除 `scripts/`；deb/rpm 仅由 GitHub Release 产出 |
-| — | 2026-11-11 | 采用 GoReleaser（对齐 krun） |
-| — | 2026-11-11 | `deploy.sh` 一键安装/卸载 |
+| 版本  | 日期       | 说明                                                                                           |
+| ----- | ---------- | ---------------------------------------------------------------------------------------------- |
+| 1.0.0 | 2025       | 初版多路拉流、热重载、打包                                                                     |
+| —     | 2026-11-11 | 代码布局改为 `cmd/` + `internal/runner`；配置与 unit 落盘到仓库                                |
+| —     | 2026-11-11 | 日志改为按日轮转，默认保留 30 天                                                               |
+| —     | 2026-11-11 | 构建基线升到 Go 1.27（当前稳定版 1.27.4）                                                      |
+| —     | 2026-11-11 | 删除 `scripts/`；deb/rpm 仅由 GitHub Release 产出                                              |
+| —     | 2026-11-11 | 采用 GoReleaser（对齐 krun）                                                                   |
+| —     | 2026-11-11 | `deploy.sh` 一键安装/卸载                                                                      |
+| —     | 2026-11-11 | 修复 Release：不再 chmod 已删除的 packaging/；module 路径 github.com/kevin197011/stream-runner |
 
 ## 开发进度记录
+
+### 2026-11-11
+
+- **做了什么**：Release workflow 去掉已删除的 `packaging/*.sh` chmod；改为 `chmod +x deploy.sh`（对齐 krun）；`.golangci.yml` goimports local-prefixes 跟上 `github.com/kevin197011/stream-runner`
+- **决策**：包 hooks 已并入 `deploy.sh`，CI 不再依赖 `packaging/`
+- **验证**：workflow 无 `packaging` 引用；`bash -n deploy.sh`；`go test ./...`
+- **遗留**：无
 
 ### 2026-11-11
 

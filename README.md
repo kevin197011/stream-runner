@@ -201,6 +201,7 @@ sudo tail -f /var/log/stream-runner/stream.log
 stream-runner/
 ├── cmd/stream-runner/
 ├── internal/runner/
+├── go.mod                 # github.com/kevin197011/stream-runner
 ├── config/streams.yml
 ├── systemd/stream-runner.service
 ├── deploy.sh                  # 安装 / 卸载（含配置与 systemd）
@@ -229,7 +230,7 @@ git push origin v1.0.1
 
 MIT License
 
-Copyright (c) 2025 kk
+Copyright (c) 2026 kk
 
 ## 贡献
 
