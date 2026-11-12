@@ -66,6 +66,10 @@ func ReloadConfig(state *AppState) error {
 		if c.stop != nil {
 			slog.Info("stopping stream", "stream_id", c.id)
 			c.stop.Stop()
+			// Keep counter series across src/dst replace; drop only when id leaves config.
+			if c.start == nil {
+				deleteStreamMetrics(c.id)
+			}
 		}
 	}
 	for _, c := range changes {
@@ -86,6 +90,8 @@ func StopWorkers(state *AppState) {
 	}
 	state.mu.Unlock()
 	for _, w := range workers {
+		id := w.cfg.ID
 		w.Stop()
+		deleteStreamMetrics(id)
 	}
 }

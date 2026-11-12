@@ -173,6 +173,7 @@ func readProgress(streamID string, r io.Reader, now func() time.Time, probe func
 			behind := t.Sub(wall0) - (media - media0)
 			gap := t.Sub(lastWall)
 			lastWall = t
+			setBehindSeconds(streamID, behind.Seconds())
 			netSample := probe()
 			attrs := []any{
 				"stream_id", streamID,

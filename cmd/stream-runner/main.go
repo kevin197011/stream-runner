@@ -80,6 +80,8 @@ func run() int {
 	writePID()
 	defer cleanupPID()
 
+	runner.StartMetricsServer(runner.MetricsAddrFromEnv())
+
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
 	slog.Info("stream-runner starting")

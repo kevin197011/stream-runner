@@ -7,7 +7,7 @@
 ### 非目标
 
 - 不做转码 / 协议转换（仅 `-c copy`）
-- 不提供 HTTP 管理 API 或 Web UI
+- 不提供 HTTP 管理 API 或 Web UI（仅 `/metrics` 刮取面）
 - 不内置 RTMP 服务端
 
 ## 用户与权限
@@ -17,21 +17,23 @@
 
 ## 功能需求
 
-| 编号     | 需求         | 验收标准                                                                                     |
-| -------- | ------------ | -------------------------------------------------------------------------------------------- |
-| FR-SR-01 | 多路流并发   | `streams.yml` 中多条 `id/src/dst` 各自独立 ffmpeg                                            |
-| FR-SR-02 | 自动重连     | ffmpeg 退出后重拉；短跑失败退避 1s→30s；连续播放 ≥20s 后再断则 1s 重拉                       |
-| FR-SR-03 | 配置热重载   | `SIGHUP` / `systemctl reload`：停删改、启新增、换 src/dst；坏配置不改现网 worker             |
-| FR-SR-04 | 日志         | 服务 JSON → `stream.log`；ffmpeg 警告/错误带时间戳与 stream id 打到 stdout/stderr            |
-| FR-SR-05 | 日志轮转     | 按本地日历日将 `stream.log` 归档为 `stream.log.YYYY-MM-DD`；默认保留 30 天；启动与每小时检查 |
-| FR-SR-06 | 源节奏观测   | 进度管解析 `behind_s` / `speed`；慢握手或落后打 `source lagging` / `pull network`            |
-| FR-SR-07 | systemd 打包 | deb/rpm 安装二进制、配置模板、unit；首次安装生成 `/etc` 配置且不覆盖已有                     |
+| 编号     | 需求            | 验收标准                                                                                                                                                                        |
+| -------- | --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| FR-SR-01 | 多路流并发      | `streams.yml` 中多条 `id/src/dst` 各自独立 ffmpeg                                                                                                                               |
+| FR-SR-02 | 自动重连        | ffmpeg 退出后重拉；短跑失败退避 1s→30s；连续播放 ≥20s 后再断则 1s 重拉                                                                                                          |
+| FR-SR-03 | 配置热重载      | `SIGHUP` / `systemctl reload`：停删改、启新增、换 src/dst；坏配置不改现网 worker                                                                                                |
+| FR-SR-04 | 日志            | 服务 JSON → `stream.log`；ffmpeg 警告/错误带时间戳与 stream id 打到 stdout/stderr                                                                                               |
+| FR-SR-05 | 日志轮转        | 按本地日历日将 `stream.log` 归档为 `stream.log.YYYY-MM-DD`；默认保留 30 天；启动与每小时检查                                                                                    |
+| FR-SR-06 | 源节奏观测      | 进度管解析 `behind_s` / `speed`；慢握手或落后打 `source lagging` / `pull network`                                                                                               |
+| FR-SR-07 | systemd 打包    | deb/rpm 安装二进制、配置模板、unit；首次安装生成 `/etc` 配置且不覆盖已有                                                                                                        |
+| FR-SR-08 | Prometheus 指标 | 默认 `METRICS_ADDR=:9108` 暴露 `/metrics`；空字符串关闭；含 `stream_up` / `ffmpeg_restarts_total` / `behind_seconds`（按 `stream_id`）及 Go/process collector；流删除时清 label |
 
 ## 非功能需求
 
 - Go 1.27+；运行时依赖 ffmpeg
 - 配置路径默认 `/etc/stream-runner/streams.yml`
 - PID：`/var/run/stream-runner.pid`；ffmpeg 独立进程组便于 Kill
+- 指标：`METRICS_ADDR` 默认 `:9108`（空=关闭）；路径 `/metrics`
 
 ## 架构概览
 
@@ -41,6 +43,7 @@ cmd/stream-runner → internal/runner
   config load → AppState workers → ffmpeg copy (+ progress probe)
   slog JSON file + daily rotate (keep 30d)
   SIGHUP reload / SIGTERM stop
+  HTTP /metrics (METRICS_ADDR, default :9108)
 ```
 
 ## 数据模型
@@ -99,6 +102,13 @@ go build -o /tmp/stream-runner ./cmd/stream-runner
 | —     | 2026-11-11 | 修复 Release：不再 chmod 已删除的 packaging/；module 路径 github.com/kevin197011/stream-runner |
 
 ## 开发进度记录
+
+### 2026-11-11
+
+- **做了什么**：FR-SR-08 Prometheus 指标：`stream_runner_stream_up` / `stream_runner_ffmpeg_restarts_total` / `stream_runner_behind_seconds` + Go/process；`METRICS_ADDR` 默认 `:9108`，空关闭；删流时 `DeleteLabelValues`
+- **决策**：对齐 client_golang 惯例；不另开管理 API；behind 复用 progress 管
+- **验证**：`go test ./...`；`curl -s localhost:9108/metrics`（本地起服务时）
+- **遗留**：无
 
 ### 2026-11-11
 

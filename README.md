@@ -9,6 +9,7 @@
 - SIGHUP / `systemctl reload` 热重载配置
 - JSON 服务日志按日轮转（默认保留 30 天）；ffmpeg 输出进 journal
 - systemd 打包（deb/rpm）+ PID / 进程组管理
+- Prometheus `/metrics`（默认 `:9108`，`METRICS_ADDR=` 关闭）
 
 ## 系统要求
 
@@ -193,6 +194,31 @@ sudo tail -f /var/log/stream-runner/stream.log
    - 按日轮转后会自动删掉超过保留天数的文件
    - 修改 `LogKeepDays` 调整保留天数
 
+## 监控（Prometheus）
+
+默认监听 `:9108`，路径 `/metrics`：
+
+```bash
+curl -s http://127.0.0.1:9108/metrics | grep stream_runner_
+```
+
+| 指标                                  | 类型    | 说明                                |
+| ------------------------------------- | ------- | ----------------------------------- |
+| `stream_runner_stream_up`             | gauge   | 该流 ffmpeg 是否在跑（`stream_id`） |
+| `stream_runner_ffmpeg_restarts_total` | counter | ffmpeg 退出并进入重试的次数         |
+| `stream_runner_behind_seconds`        | gauge   | 媒体时钟落后墙钟的秒数              |
+
+环境变量：`METRICS_ADDR`（默认 `:9108`；设为空字符串则关闭）。另含 Go / process collector。
+
+Prometheus scrape 示例：
+
+```yaml
+scrape_configs:
+  - job_name: stream-runner
+    static_configs:
+      - targets: ["127.0.0.1:9108"]
+```
+
 ## 开发
 
 ### 项目结构
@@ -200,7 +226,7 @@ sudo tail -f /var/log/stream-runner/stream.log
 ```
 stream-runner/
 ├── cmd/stream-runner/
-├── internal/runner/
+├── internal/runner/         # 含 Prometheus metrics
 ├── go.mod                 # github.com/kevin197011/stream-runner
 ├── config/streams.yml
 ├── systemd/stream-runner.service

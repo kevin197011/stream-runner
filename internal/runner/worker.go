@@ -148,6 +148,7 @@ func (w *StreamWorker) runOnce() (time.Duration, error) {
 		w.mu.Unlock()
 		return 0, err
 	}
+	setStreamUp(w.cfg.ID, true)
 	closeRead(progressW)
 	if w.stoppedRequested() {
 		w.kill()
@@ -174,6 +175,7 @@ func (w *StreamWorker) runOnce() (time.Duration, error) {
 	err = cmd.Wait()
 	wg.Wait()
 
+	setStreamUp(w.cfg.ID, false)
 	w.mu.Lock()
 	w.cmd = nil
 	w.mu.Unlock()
@@ -192,6 +194,7 @@ func (w *StreamWorker) startLoop() {
 		if w.stoppedRequested() {
 			return
 		}
+		incFFmpegRestarts(w.cfg.ID)
 		exitAttrs := []any{"stream_id", w.cfg.ID, "retry_in", backoff.String()}
 		exitAttrs = append(exitAttrs, probePull(w.cfg.Src).logAttrs()...)
 		if err != nil {
