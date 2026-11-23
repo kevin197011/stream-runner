@@ -3,40 +3,25 @@
 // This software is released under the MIT License.
 // https://opensource.org/licenses/MIT
 
-// Package main supervises ffmpeg processes that copy RTMP streams.
+// Package main supervises in-process RTMP remux workers.
 package main
 
 import (
 	"fmt"
 	"log/slog"
 	"os"
-	"os/exec"
 	"os/signal"
-	"strings"
+	"path/filepath"
 	"syscall"
 	"time"
 
 	"github.com/kevin197011/stream-runner/internal/runner"
 )
 
-func checkFFmpeg() error {
-	cmd := exec.Command("ffmpeg", "-version")
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("ffmpeg not found or not executable: %v", err)
-	}
-	lines := strings.Split(string(output), "\n")
-	if len(lines) > 0 {
-		if _, err := fmt.Fprintf(os.Stderr, "[*] FFmpeg detected: %s\n", strings.TrimSpace(lines[0])); err != nil {
-			slog.Warn("failed to write ffmpeg version to stderr", "error", err)
-		}
-	}
-	return nil
-}
-
 func writePID() {
-	if err := os.MkdirAll("/var/run", 0755); err != nil {
-		slog.Error("cannot create /var/run directory", "error", err)
+	dir := filepath.Dir(runner.PIDFilePath)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		slog.Error("cannot create pid directory", "dir", dir, "error", err)
 		os.Exit(1)
 	}
 	f, err := os.OpenFile(runner.PIDFilePath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
@@ -63,12 +48,7 @@ func cleanupPID() {
 }
 
 func run() int {
-	if err := checkFFmpeg(); err != nil {
-		if _, werr := fmt.Fprintf(os.Stderr, "ERROR: %v\n", err); werr != nil {
-			return 1
-		}
-		return 1
-	}
+	runner.ApplyEnvPaths()
 	if err := runner.InitLog(); err != nil {
 		if _, werr := fmt.Fprintf(os.Stderr, "ERROR: %v\n", err); werr != nil {
 			return 1

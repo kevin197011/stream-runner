@@ -4,19 +4,19 @@
 
 ## 功能特性
 
-- 多路 RTMP 拷贝（ffmpeg `-c copy`）
+- 多路 RTMP remux（纯 Go gortmplib，无 ffmpeg）
 - 自动重连：短失败 1s→30s 退避；连续播放 ≥20s 后再断则 1s 重拉
 - SIGHUP / `systemctl reload` 热重载配置
-- JSON 服务日志按日轮转（默认保留 30 天）；ffmpeg 输出进 journal
-- systemd 打包（deb/rpm）+ PID / 进程组管理
+- JSON 服务日志按日轮转（默认保留 30 天）
+- systemd 打包（deb/rpm）+ PID 管理
 - Prometheus `/metrics`（默认 `:9108`，`METRICS_ADDR=` 关闭）
 
 ## 系统要求
 
 - Linux 系统（推荐）
 - Go 1.27 或更高版本（用于构建）
-- ffmpeg（运行时必需）
 - systemd（用于服务管理，可选）
+- 无运行时外部二进制依赖
 
 ## 安装 / 卸载
 
@@ -139,11 +139,11 @@ sudo kill -HUP $(cat /var/run/stream-runner.pid)
 
 ### 日志格式
 
-`stream.log` 是服务自己的 JSON 日志。ffmpeg 的警告和错误在进程标准输出上，systemd 下用 `journalctl -u stream-runner -f` 看。每行带时间戳和流 ID，不再重复打印 ffmpeg 版本横幅。
+`stream.log` 是服务 JSON 日志（含 relay 错误与源节奏）。systemd 下也可用 `journalctl -u stream-runner -f`。
 
-拉流成功后，每 10 秒在 `stream.log` 记一条源节奏。`behind_s` 是从这次拉流起，墙上时间比媒体时间多出来的秒数：大于 0 表示源送得比实时慢，落后在累积。达到 3 秒，或两次采样间隔超过 20 秒，记 `source lagging`。`speed` 是 ffmpeg 的输出倍速，明显低于 `1.0x` 同样说明源在拖。
+拉流成功后，每 10 秒在 `stream.log` 记一条源节奏。`behind_s` 是从这次拉流起，墙上时间比媒体 PTS 多出来的秒数：大于 0 表示源送得比实时慢。达到 3 秒，或两次采样间隔超过 20 秒，记 `source lagging`。`speed` 是该窗口内媒体时间 / 墙钟 的近似倍速，明显低于 `1.0x` 同样说明源在拖。
 
-同一条里带拉流路径：`src_host`、`src_ip`、`resolve_ms`（解析耗时）、`dial_ms`（连上该 IP 的 TCP 握手耗时）。解析或握手失败多一个 `dial_error`。握手达到 300 毫秒或失败，而媒体时钟还正常时，记 `pull network`。ffmpeg 一退出也会再探一次并写在 `ffmpeg exited` 上，所以源站还没连上、没有进度时也能看到网络结果。`behind_s` 变大而 `dial_ms` 很小，是源没在送；两个一起变大，网络也慢。这不是正在拉流那条连接的内核 RTT，也不是摄像机到画面的端到端延迟。
+同一条里带拉流路径：`src_host`、`src_ip`、`resolve_ms`、`dial_ms`。解析或握手失败多一个 `dial_error`。握手达到 300 毫秒或失败，而媒体时钟还正常时，记 `pull network`。relay 退出时也会再探一次并写在 `relay exited` 上。`behind_s` 变大而 `dial_ms` 很小，是源没在送；两个一起变大，网络也慢。这不是正在拉流那条连接的内核 RTT，也不是摄像机到画面的端到端延迟。
 
 ### 日志轮转
 
@@ -161,13 +161,9 @@ sudo kill -HUP $(cat /var/run/stream-runner.pid)
 ## 进程管理
 
 - PID 文件：`/var/run/stream-runner.pid`
-- 进程组：每个 ffmpeg 进程在独立的进程组中运行，便于管理
+- Stop / reload 通过取消 in-process relay（关闭 RTMP 连接）
 
 ## 故障排查
-
-### 检查 ffmpeg 是否安装
-
-服务启动前会自动检查 ffmpeg 是否可用，如果不存在会直接退出。
 
 ### 查看服务状态
 
@@ -202,11 +198,13 @@ sudo tail -f /var/log/stream-runner/stream.log
 curl -s http://127.0.0.1:9108/metrics | grep stream_runner_
 ```
 
-| 指标                                  | 类型    | 说明                                |
-| ------------------------------------- | ------- | ----------------------------------- |
-| `stream_runner_stream_up`             | gauge   | 该流 ffmpeg 是否在跑（`stream_id`） |
-| `stream_runner_ffmpeg_restarts_total` | counter | ffmpeg 退出并进入重试的次数         |
-| `stream_runner_behind_seconds`        | gauge   | 媒体时钟落后墙钟的秒数              |
+| 指标                                 | 类型    | 说明                               |
+| ------------------------------------ | ------- | ---------------------------------- |
+| `stream_runner_stream_up`            | gauge   | 该流 relay 是否在跑（`stream_id`） |
+| `stream_runner_relay_restarts_total` | counter | relay 退出并进入重试的次数         |
+| `stream_runner_behind_seconds`       | gauge   | 媒体时钟落后墙钟的秒数             |
+
+路径覆盖（本机调试）：`STREAM_RUNNER_CONFIG`、`STREAM_RUNNER_LOG_DIR`、`STREAM_RUNNER_LOG_FILE`、`STREAM_RUNNER_PID`。
 
 环境变量：`METRICS_ADDR`（默认 `:9108`；设为空字符串则关闭）。另含 Go / process collector。
 

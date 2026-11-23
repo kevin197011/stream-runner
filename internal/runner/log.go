@@ -19,13 +19,14 @@ import (
 	"time"
 )
 
-const (
-	// LogDir is the default log directory.
+// LogKeepDays is how many calendar days of rotated logs to keep (about one month).
+const LogKeepDays = 30
+
+var (
+	// LogDir is the log directory (override with STREAM_RUNNER_LOG_DIR).
 	LogDir = "/var/log/stream-runner"
-	// LogFile is the default slog JSON log file.
+	// LogFile is the slog JSON log file (override with STREAM_RUNNER_LOG_FILE).
 	LogFile = "/var/log/stream-runner/stream.log"
-	// LogKeepDays is how many calendar days of rotated logs to keep (about one month).
-	LogKeepDays = 30
 )
 
 // logNow is the clock for day boundaries; tests replace it.

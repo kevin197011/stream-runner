@@ -13,12 +13,29 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-const (
-	// ConfigPath is the default stream configuration file.
+var (
+	// ConfigPath is the stream configuration file (override with STREAM_RUNNER_CONFIG).
 	ConfigPath = "/etc/stream-runner/streams.yml"
-	// PIDFilePath is the default pid file.
+	// PIDFilePath is the pid file (override with STREAM_RUNNER_PID).
 	PIDFilePath = "/var/run/stream-runner.pid"
 )
+
+// ApplyEnvPaths overrides ConfigPath / PID / log paths from environment.
+func ApplyEnvPaths() {
+	if v := os.Getenv("STREAM_RUNNER_CONFIG"); v != "" {
+		ConfigPath = v
+	}
+	if v := os.Getenv("STREAM_RUNNER_PID"); v != "" {
+		PIDFilePath = v
+	}
+	if v := os.Getenv("STREAM_RUNNER_LOG_DIR"); v != "" {
+		LogDir = v
+		LogFile = v + "/stream.log"
+	}
+	if v := os.Getenv("STREAM_RUNNER_LOG_FILE"); v != "" {
+		LogFile = v
+	}
+}
 
 // StreamConfig is one RTMP copy.
 type StreamConfig struct {

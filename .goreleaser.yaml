@@ -54,8 +54,6 @@ nfpms:
     bindir: /usr/local/bin
     section: utils
     priority: optional
-    dependencies:
-      - ffmpeg
     contents:
       - src: config/streams.yml
         dst: /usr/share/stream-runner/streams.yml

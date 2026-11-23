@@ -36,7 +36,7 @@ func TestMetricsExposeAndDelete(t *testing.T) {
 	deleteStreamMetrics(id)
 
 	setStreamUp(id, true)
-	incFFmpegRestarts(id)
+	incRelayRestarts(id)
 	setBehindSeconds(id, 1.5)
 
 	rec := httptest.NewRecorder()
@@ -46,7 +46,7 @@ func TestMetricsExposeAndDelete(t *testing.T) {
 	out := string(body)
 	for _, want := range []string{
 		`stream_runner_stream_up{stream_id="metrics-test-stream"} 1`,
-		`stream_runner_ffmpeg_restarts_total{stream_id="metrics-test-stream"} 1`,
+		`stream_runner_relay_restarts_total{stream_id="metrics-test-stream"} 1`,
 		`stream_runner_behind_seconds{stream_id="metrics-test-stream"} 1.5`,
 	} {
 		if !strings.Contains(out, want) {

@@ -22,12 +22,12 @@ var (
 
 	streamUp = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "stream_runner_stream_up",
-		Help: "1 if ffmpeg is running for the stream, else 0",
+		Help: "1 if the relay is running for the stream, else 0",
 	}, []string{"stream_id"})
 
-	ffmpegRestarts = prometheus.NewCounterVec(prometheus.CounterOpts{
-		Name: "stream_runner_ffmpeg_restarts_total",
-		Help: "Times ffmpeg exited and the worker scheduled a retry",
+	relayRestarts = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "stream_runner_relay_restarts_total",
+		Help: "Times the relay exited and the worker scheduled a retry",
 	}, []string{"stream_id"})
 
 	behindSeconds = prometheus.NewGaugeVec(prometheus.GaugeOpts{
@@ -41,7 +41,7 @@ func init() {
 		collectors.NewGoCollector(),
 		collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),
 		streamUp,
-		ffmpegRestarts,
+		relayRestarts,
 		behindSeconds,
 	)
 }
@@ -80,8 +80,8 @@ func setStreamUp(streamID string, up bool) {
 	streamUp.WithLabelValues(streamID).Set(v)
 }
 
-func incFFmpegRestarts(streamID string) {
-	ffmpegRestarts.WithLabelValues(streamID).Inc()
+func incRelayRestarts(streamID string) {
+	relayRestarts.WithLabelValues(streamID).Inc()
 }
 
 func setBehindSeconds(streamID string, seconds float64) {
@@ -91,6 +91,6 @@ func setBehindSeconds(streamID string, seconds float64) {
 // deleteStreamMetrics drops per-stream series so removed ids do not leak labels.
 func deleteStreamMetrics(streamID string) {
 	streamUp.DeleteLabelValues(streamID)
-	ffmpegRestarts.DeleteLabelValues(streamID)
+	relayRestarts.DeleteLabelValues(streamID)
 	behindSeconds.DeleteLabelValues(streamID)
 }

@@ -6,15 +6,12 @@
 package runner
 
 import (
-	"bufio"
 	"context"
 	"fmt"
-	"io"
 	"log/slog"
 	"net"
 	"net/url"
-	"strconv"
-	"strings"
+	"sync"
 	"time"
 )
 
@@ -27,21 +24,6 @@ const (
 	// netWarn is a slow TCP handshake to the pull source.
 	netWarn = 300 * time.Millisecond
 )
-
-func parseOutTime(v string) (time.Duration, bool) {
-	parts := strings.SplitN(v, ":", 3)
-	if len(parts) != 3 {
-		return 0, false
-	}
-	hour, err1 := strconv.Atoi(parts[0])
-	min, err2 := strconv.Atoi(parts[1])
-	sec, err3 := strconv.ParseFloat(parts[2], 64)
-	if err1 != nil || err2 != nil || err3 != nil {
-		return 0, false
-	}
-	d := time.Duration(hour)*time.Hour + time.Duration(min)*time.Minute + time.Duration(sec*float64(time.Second))
-	return d, true
-}
 
 // pullNet is one probe of the path to the pull source.
 // ponytail: fresh connect, not the live RTMP socket RTT. Use that socket's TCP_INFO if this number disagrees with the path.
@@ -115,84 +97,71 @@ func probePull(src string) pullNet {
 		out.err = err
 		return out
 	}
-	if cerr := conn.Close(); cerr != nil {
-		// Handshake finished. A close error is not path delay.
-	}
+	_ = conn.Close()
 	return out
 }
 
-// readProgress logs source pace and the pull-path probe.
-// behind_s grows when media arrives slower than realtime.
-func readProgress(streamID string, r io.Reader, now func() time.Time, probe func() pullNet) {
-	sc := bufio.NewScanner(r)
-	var (
-		media     time.Duration
-		haveMedia bool
-		speed     string
-		fps       string
-		wall0     time.Time
-		media0    time.Duration
-		lastWall  time.Time
-		haveBase  bool
-	)
-	for sc.Scan() {
-		key, val, ok := strings.Cut(sc.Text(), "=")
-		if !ok {
-			continue
-		}
-		switch key {
-		case "out_time_us":
-			n, err := strconv.ParseInt(val, 10, 64)
-			if err != nil {
-				continue
-			}
-			media = time.Duration(n) * time.Microsecond
-			haveMedia = true
-		case "out_time":
-			if haveMedia {
-				continue
-			}
-			d, ok := parseOutTime(val)
-			if !ok {
-				continue
-			}
-			media = d
-			haveMedia = true
-		case "fps":
-			fps = val
-		case "speed":
-			speed = strings.TrimSpace(val)
-		case "progress":
-			if (val != "continue" && val != "end") || !haveMedia {
-				continue
-			}
-			t := now()
-			if !haveBase {
-				wall0, media0, lastWall, haveBase = t, media, t, true
-			}
-			behind := t.Sub(wall0) - (media - media0)
-			gap := t.Sub(lastWall)
-			lastWall = t
-			setBehindSeconds(streamID, behind.Seconds())
-			netSample := probe()
-			attrs := []any{
-				"stream_id", streamID,
-				"behind_s", fmt.Sprintf("%.1f", behind.Seconds()),
-				"speed", speed,
-				"fps", fps,
-				"gap_s", fmt.Sprintf("%.1f", gap.Seconds()),
-			}
-			attrs = append(attrs, netSample.logAttrs()...)
-			switch {
-			case behind >= lagWarn || gap > statsPeriod*2:
-				slog.Warn("source lagging", attrs...)
-			case netSample.slow():
-				slog.Warn("pull network", attrs...)
-			default:
-				slog.Info("source pace", attrs...)
-			}
-			haveMedia = false
-			speed, fps = "", ""
-		}
+// paceTracker compares media PTS deltas to wall time and logs every statsPeriod.
+// Incremental behind avoids a bad first PTS (e.g. audio at 0, video already large).
+type paceTracker struct {
+	streamID string
+	probe    func() pullNet
+	now      func() time.Time
+
+	mu        sync.Mutex
+	lastWall  time.Time
+	lastMedia time.Duration
+	behind    time.Duration
+	haveBase  bool
+}
+
+func newPaceTracker(streamID string, probe func() pullNet) *paceTracker {
+	return &paceTracker{streamID: streamID, probe: probe, now: time.Now}
+}
+
+func (p *paceTracker) note(pts time.Duration) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	t := p.now()
+	if !p.haveBase {
+		p.lastWall, p.lastMedia, p.haveBase = t, pts, true
+		return
+	}
+	if t.Sub(p.lastWall) < statsPeriod {
+		return
+	}
+	gap := t.Sub(p.lastWall)
+	mediaDelta := pts - p.lastMedia
+	// PTS reset / track switch: ignore this window's media jump, keep wall gap.
+	if mediaDelta < 0 || mediaDelta > gap*4 {
+		mediaDelta = gap
+	}
+	p.behind += gap - mediaDelta
+	// Startup/buffer lead is not lag; floor at 0 for the metric.
+	if p.behind < 0 {
+		p.behind = 0
+	}
+	speed := ""
+	if gap > 0 {
+		speed = fmt.Sprintf("%.2fx", float64(mediaDelta)/float64(gap))
+	}
+	p.lastWall = t
+	p.lastMedia = pts
+	setBehindSeconds(p.streamID, p.behind.Seconds())
+	netSample := p.probe()
+	attrs := []any{
+		"stream_id", p.streamID,
+		"behind_s", fmt.Sprintf("%.1f", p.behind.Seconds()),
+		"speed", speed,
+		"gap_s", fmt.Sprintf("%.1f", gap.Seconds()),
+	}
+	attrs = append(attrs, netSample.logAttrs()...)
+	switch {
+	case p.behind >= lagWarn || gap > statsPeriod*2:
+		slog.Warn("source lagging", attrs...)
+	case netSample.slow():
+		slog.Warn("pull network", attrs...)
+	default:
+		slog.Info("source pace", attrs...)
 	}
 }

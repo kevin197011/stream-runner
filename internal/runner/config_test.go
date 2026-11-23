@@ -87,3 +87,17 @@ func TestLoadConfigRejectsDuplicateID(t *testing.T) {
 		t.Fatal("expected duplicate id to fail")
 	}
 }
+
+func TestApplyEnvPaths(t *testing.T) {
+	origC, origP, origD, origF := ConfigPath, PIDFilePath, LogDir, LogFile
+	t.Cleanup(func() {
+		ConfigPath, PIDFilePath, LogDir, LogFile = origC, origP, origD, origF
+	})
+	t.Setenv("STREAM_RUNNER_CONFIG", "/tmp/sr-cfg.yml")
+	t.Setenv("STREAM_RUNNER_PID", "/tmp/sr.pid")
+	t.Setenv("STREAM_RUNNER_LOG_DIR", "/tmp/sr-logs")
+	ApplyEnvPaths()
+	if ConfigPath != "/tmp/sr-cfg.yml" || PIDFilePath != "/tmp/sr.pid" || LogDir != "/tmp/sr-logs" || LogFile != "/tmp/sr-logs/stream.log" {
+		t.Fatalf("got config=%q pid=%q logdir=%q logfile=%q", ConfigPath, PIDFilePath, LogDir, LogFile)
+	}
+}

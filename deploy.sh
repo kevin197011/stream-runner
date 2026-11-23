@@ -66,25 +66,6 @@ sr::resolve_version() {
 	echo "$tag"
 }
 
-sr::ensure_ffmpeg() {
-	if command -v ffmpeg >/dev/null 2>&1; then
-		return 0
-	fi
-	sr::log "ffmpeg missing — installing..."
-	if command -v apt-get >/dev/null 2>&1; then
-		apt-get update -y >/dev/null
-		apt-get install -y ffmpeg || sr::die "failed to install ffmpeg (apt)"
-	elif command -v dnf >/dev/null 2>&1; then
-		dnf install -y ffmpeg || sr::die "failed to install ffmpeg (dnf)"
-	elif command -v yum >/dev/null 2>&1; then
-		yum install -y ffmpeg || sr::die "failed to install ffmpeg (yum)"
-	else
-		sr::die "ffmpeg required but no apt/dnf/yum available"
-	fi
-	command -v ffmpeg >/dev/null 2>&1 || sr::die "ffmpeg still missing after install"
-	sr::log "ffmpeg installed: $(command -v ffmpeg)"
-}
-
 # Former packaging/postinstall: config template + enable/restart unit.
 sr::setup_service() {
 	install -d -m 0755 "$CFG_DIR"
@@ -112,7 +93,6 @@ sr::try_package() {
 	if command -v apt-get >/dev/null 2>&1; then
 		local deb="stream-runner_${ver}_${arch}.deb"
 		if sr::curl -o "${tmp}/${deb}" "${base}/${deb}" 2>/dev/null; then
-			# apt resolves Depends (ffmpeg); fall back to dpkg + fix-broken.
 			if apt-get install -y "${tmp}/${deb}" 2>/dev/null ||
 				{ dpkg -i "${tmp}/${deb}" 2>/dev/null && apt-get install -y -f; }; then
 				sr::log "installed via ${deb}"
@@ -132,7 +112,7 @@ sr::try_package() {
 				return 0
 			fi
 			if rpm -Uvh "${tmp}/${rpm}" 2>/dev/null; then
-				sr::log "installed via ${rpm} (rpm -Uvh; install ffmpeg separately if needed)"
+				sr::log "installed via ${rpm} (rpm -Uvh)"
 				return 0
 			fi
 		fi
@@ -179,7 +159,6 @@ sr::install() {
 	arch="$(sr::arch)"
 	tag="$(sr::resolve_version)"
 	sr::log "Installing stream-runner ${tag} (linux/${arch})"
-	sr::ensure_ffmpeg
 
 	if sr::try_package "$arch" "$tag"; then
 		sr::setup_service

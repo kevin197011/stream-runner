@@ -6,7 +6,7 @@
 package runner
 
 import (
-	"os/exec"
+	"context"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -25,24 +25,26 @@ func TestRetryAfter(t *testing.T) {
 }
 
 func TestWorkerRestartsUntilStop(t *testing.T) {
-	orig := startFFmpeg
+	orig := relayOnce
 	var starts atomic.Int32
-	startFFmpeg = func(src, dst string) *exec.Cmd {
-		if starts.Add(1) == 1 {
-			return exec.Command("sleep", "0.2")
+	relayOnce = func(ctx context.Context, id, src, dst string) error {
+		n := starts.Add(1)
+		if n == 1 {
+			return context.DeadlineExceeded
 		}
-		return exec.Command("sleep", "30")
+		<-ctx.Done()
+		return ctx.Err()
 	}
-	t.Cleanup(func() { startFFmpeg = orig })
+	t.Cleanup(func() { relayOnce = orig })
 
-	w := &StreamWorker{cfg: StreamConfig{ID: "t", Src: "a", Dst: "b"}}
+	w := &StreamWorker{cfg: StreamConfig{ID: "t", Src: "rtmp://a/live/x", Dst: "rtmp://b/live/x"}}
 	w.Start()
 	deadline := time.Now().Add(4 * time.Second)
 	for starts.Load() < 2 && time.Now().Before(deadline) {
 		time.Sleep(20 * time.Millisecond)
 	}
 	if starts.Load() < 2 {
-		t.Fatalf("ffmpeg was not restarted, starts=%d", starts.Load())
+		t.Fatalf("relay was not restarted, starts=%d", starts.Load())
 	}
 
 	done := make(chan struct{})
